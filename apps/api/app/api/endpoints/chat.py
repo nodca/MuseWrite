@@ -156,8 +156,6 @@ from app.services.llm_provider import ChatGenerationResult, generate_chat, gener
 from app.services.retrieval_adapters import (
     fetch_neo4j_graph_timeline_snapshot,
     list_neo4j_graph_candidates,
-    promote_neo4j_candidate_facts,
-    update_neo4j_graph_fact_state,
 )
 from app.services.telemetry import ChatTracePayload, emit_chat_trace
 from .chat_helpers import (
@@ -172,6 +170,7 @@ from .chat_helpers import (
     filter_project_dead_letters as _filter_project_dead_letters,
     normalize_ghost_suggestion as _normalize_ghost_suggestion,
     replay_dead_letters as _replay_dead_letters,
+    review_graph_candidate_batch as _review_graph_candidate_batch,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -1174,46 +1173,22 @@ def review_project_graph_candidates(
     principal: AuthPrincipal = Depends(get_current_principal),
 ):
     _ensure_project_access(project_id, principal)
-    if not bool(payload.manual_confirmed):
-        raise HTTPException(status_code=400, detail="graph candidate review requires manual_confirmed=true")
-    if not is_manual_merge_operator(principal.user_id):
-        raise HTTPException(status_code=403, detail="graph candidate review can only be applied by a human operator")
-
-    normalized_fact_keys = list(dict.fromkeys([str(item).strip() for item in payload.fact_keys if str(item).strip()]))
-    if not normalized_fact_keys:
-        raise HTTPException(status_code=400, detail="fact_keys is required")
-
-    decision = str(payload.decision or "confirm").strip().lower()
     chapter_index = int(payload.chapter_index or 0) if payload.chapter_index else None
-
-    reviewed_count = 0
-    reviewed_fact_keys: list[str] = []
-    if decision == "confirm":
-        reviewed_fact_keys = promote_neo4j_candidate_facts(
-            project_id,
-            fact_keys=normalized_fact_keys,
-            source_ref="",
-            min_confidence=None,
-            limit=max(len(normalized_fact_keys), 1),
-            current_chapter=chapter_index,
-        )
-        reviewed_count = len(reviewed_fact_keys)
-    else:
-        reviewed_count = update_neo4j_graph_fact_state(
-            project_id,
-            normalized_fact_keys,
-            to_state="rejected",
-            from_state="candidate",
-            current_chapter=chapter_index,
-        )
-        reviewed_fact_keys = normalized_fact_keys
+    result = _review_graph_candidate_batch(
+        project_id=project_id,
+        decision=payload.decision,
+        fact_keys=payload.fact_keys,
+        manual_confirmed=bool(payload.manual_confirmed),
+        chapter_index=chapter_index,
+        operator_id=principal.user_id,
+    )
 
     return GraphCandidateBatchReviewResponse(
         project_id=project_id,
-        decision=decision,
-        requested_count=len(normalized_fact_keys),
-        reviewed_count=max(int(reviewed_count), 0),
-        fact_keys=reviewed_fact_keys,
+        decision=str(result.get("decision") or "confirm"),
+        requested_count=int(result.get("requested_count") or 0),
+        reviewed_count=int(result.get("reviewed_count") or 0),
+        fact_keys=list(result.get("fact_keys") or []),
     )
 
 

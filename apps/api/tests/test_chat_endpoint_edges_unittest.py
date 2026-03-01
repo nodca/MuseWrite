@@ -228,7 +228,7 @@ class ChatEndpointEdgesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json().get("detail"), "fact_keys is required")
 
-    @patch("app.api.endpoints.chat.promote_neo4j_candidate_facts")
+    @patch("app.api.endpoints.chat_helpers.promote_neo4j_candidate_facts")
     def test_graph_candidates_review_confirm_path_calls_promote(self, mock_promote) -> None:
         mock_promote.return_value = ["fact-1", "fact-2"]
         response = self.client.post(
@@ -256,7 +256,7 @@ class ChatEndpointEdgesTestCase(unittest.TestCase):
             current_chapter=3,
         )
 
-    @patch("app.api.endpoints.chat.update_neo4j_graph_fact_state")
+    @patch("app.api.endpoints.chat_helpers.update_neo4j_graph_fact_state")
     def test_graph_candidates_review_reject_path_calls_update(self, mock_update) -> None:
         mock_update.return_value = 2
         response = self.client.post(

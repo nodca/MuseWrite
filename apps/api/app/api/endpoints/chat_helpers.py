@@ -11,12 +11,17 @@ from app.services.chat_service import (
     create_action_audit_log,
     get_action_by_id,
     get_session_by_id,
+    is_manual_merge_operator,
 )
 from app.services.index_lifecycle_queue import (
     enqueue_index_lifecycle_job,
     push_index_lifecycle_dead_letter,
 )
 from app.services.llm_provider import ChatGenerationResult
+from app.services.retrieval_adapters import (
+    promote_neo4j_candidate_facts,
+    update_neo4j_graph_fact_state,
+)
 
 
 def enforce_quality_gate(generation: ChatGenerationResult, model_context: dict) -> ChatGenerationResult:
@@ -269,6 +274,55 @@ def normalize_ghost_suggestion(value: str) -> str:
     if len(merged) > 200:
         merged = merged[:200].rstrip()
     return merged
+
+
+def review_graph_candidate_batch(
+    *,
+    project_id: int,
+    decision: str | None,
+    fact_keys: list[Any],
+    manual_confirmed: bool,
+    chapter_index: int | None,
+    operator_id: str,
+) -> dict[str, Any]:
+    if not bool(manual_confirmed):
+        raise HTTPException(status_code=400, detail="graph candidate review requires manual_confirmed=true")
+    if not is_manual_merge_operator(operator_id):
+        raise HTTPException(status_code=403, detail="graph candidate review can only be applied by a human operator")
+
+    normalized_fact_keys = list(dict.fromkeys([str(item).strip() for item in fact_keys if str(item).strip()]))
+    if not normalized_fact_keys:
+        raise HTTPException(status_code=400, detail="fact_keys is required")
+
+    normalized_decision = str(decision or "confirm").strip().lower()
+    reviewed_count = 0
+    reviewed_fact_keys: list[str] = []
+    if normalized_decision == "confirm":
+        reviewed_fact_keys = promote_neo4j_candidate_facts(
+            project_id,
+            fact_keys=normalized_fact_keys,
+            source_ref="",
+            min_confidence=None,
+            limit=max(len(normalized_fact_keys), 1),
+            current_chapter=chapter_index,
+        )
+        reviewed_count = len(reviewed_fact_keys)
+    else:
+        reviewed_count = update_neo4j_graph_fact_state(
+            project_id,
+            normalized_fact_keys,
+            to_state="rejected",
+            from_state="candidate",
+            current_chapter=chapter_index,
+        )
+        reviewed_fact_keys = normalized_fact_keys
+
+    return {
+        "decision": normalized_decision,
+        "requested_count": len(normalized_fact_keys),
+        "reviewed_count": max(int(reviewed_count), 0),
+        "fact_keys": reviewed_fact_keys,
+    }
 
 
 def filter_project_dead_letters(
