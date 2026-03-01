@@ -1708,11 +1708,11 @@ type DraftWorkspacePanelProps = {
   draftSaving: boolean;
   draftTitle: string;
   setDraftTitle: (value: string) => void;
-  createChapterAndSwitchRef: { current: () => Promise<void> };
-  moveActiveChapterRef: { current: (direction: "up" | "down") => Promise<void> };
+  onCreateChapterAndSwitch: () => Promise<void>;
+  onMoveActiveChapter: (direction: "up" | "down") => Promise<void>;
   canMoveChapterUp: boolean;
   canMoveChapterDown: boolean;
-  deleteActiveChapterRef: { current: () => Promise<void> };
+  onDeleteActiveChapter: () => Promise<void>;
   awarenessTags: string[];
   draftFocusMode: boolean;
   autoSaveState: DraftAutoSaveState;
@@ -1735,7 +1735,7 @@ type DraftWorkspacePanelProps = {
   rejectGhostTextRef: { current: () => void };
   regenerateGhostTextRef: { current: () => Promise<void> };
   onToggleGhostAuto: () => void;
-  saveDraftSnapshotRef: { current: () => Promise<void> };
+  onSaveDraftSnapshot: () => Promise<void>;
   refreshDraftSnapshotRef: { current: (nextProjectId: number, preferredChapterId?: number | null) => Promise<void> };
   projectId: number;
   fillPromptFromSelectionRef: { current: (mode: "polish" | "expand") => void };
@@ -1762,11 +1762,11 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   draftSaving,
   draftTitle,
   setDraftTitle,
-  createChapterAndSwitchRef,
-  moveActiveChapterRef,
+  onCreateChapterAndSwitch,
+  onMoveActiveChapter,
   canMoveChapterUp,
   canMoveChapterDown,
-  deleteActiveChapterRef,
+  onDeleteActiveChapter,
   awarenessTags,
   draftFocusMode,
   autoSaveState,
@@ -1789,7 +1789,7 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   rejectGhostTextRef,
   regenerateGhostTextRef,
   onToggleGhostAuto,
-  saveDraftSnapshotRef,
+  onSaveDraftSnapshot,
   refreshDraftSnapshotRef,
   projectId,
   fillPromptFromSelectionRef,
@@ -1842,26 +1842,26 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
             disabled={draftLoading || draftSaving || !activeChapterId}
           />
         </label>
-        <button className="btn ghost tiny" onClick={() => void createChapterAndSwitchRef.current()} disabled={draftLoading || draftSaving}>
+        <button className="btn ghost tiny" onClick={() => void onCreateChapterAndSwitch()} disabled={draftLoading || draftSaving}>
           新建章节
         </button>
         <button
           className="btn ghost tiny"
-          onClick={() => void moveActiveChapterRef.current("up")}
+          onClick={() => void onMoveActiveChapter("up")}
           disabled={draftLoading || draftSaving || !canMoveChapterUp}
         >
           上移
         </button>
         <button
           className="btn ghost tiny"
-          onClick={() => void moveActiveChapterRef.current("down")}
+          onClick={() => void onMoveActiveChapter("down")}
           disabled={draftLoading || draftSaving || !canMoveChapterDown}
         >
           下移
         </button>
         <button
           className="btn ghost tiny"
-          onClick={() => void deleteActiveChapterRef.current()}
+          onClick={() => void onDeleteActiveChapter()}
           disabled={draftLoading || draftSaving || !activeChapterId}
         >
           删除章节
@@ -1979,7 +1979,7 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
         <p className="ghost-shortcuts">快捷键：Tab 接受 · Esc 拒绝 · Alt + ] 重生</p>
       </div>
       <div className="draft-actions">
-        <button className="btn primary tiny" onClick={() => void saveDraftSnapshotRef.current()} disabled={draftSaving || draftLoading}>
+        <button className="btn primary tiny" onClick={() => void onSaveDraftSnapshot()} disabled={draftSaving || draftLoading}>
           {draftSaving ? "保存中..." : "保存正文"}
         </button>
         <button
@@ -3376,10 +3376,6 @@ export default function App() {
   const handleOutlineDragStartRef = useRef<(chapterId: number) => void>(() => undefined);
   const handleOutlineDragEndRef = useRef<() => void>(() => undefined);
   const rollbackDraftToVersionRef = useRef<(targetVersion: number) => Promise<void>>(async () => undefined);
-  const createChapterAndSwitchRef = useRef<() => Promise<void>>(async () => undefined);
-  const moveActiveChapterRef = useRef<(direction: "up" | "down") => Promise<void>>(async () => undefined);
-  const deleteActiveChapterRef = useRef<() => Promise<void>>(async () => undefined);
-  const saveDraftSnapshotRef = useRef<() => Promise<void>>(async () => undefined);
   const refreshDraftSnapshotRef = useRef<
     (nextProjectId: number, preferredChapterId?: number | null) => Promise<void>
   >(async () => undefined);
@@ -5510,10 +5506,6 @@ export default function App() {
   handleOutlineDragStartRef.current = handleOutlineDragStart;
   handleOutlineDragEndRef.current = handleOutlineDragEnd;
   rollbackDraftToVersionRef.current = rollbackDraftToVersion;
-  createChapterAndSwitchRef.current = createChapterAndSwitch;
-  moveActiveChapterRef.current = moveActiveChapter;
-  deleteActiveChapterRef.current = deleteActiveChapter;
-  saveDraftSnapshotRef.current = saveDraftSnapshot;
   refreshDraftSnapshotRef.current = refreshDraftSnapshot;
   fillPromptFromSelectionRef.current = fillPromptFromSelection;
   applyAssistantToDraftRef.current = applyAssistantToDraft;
@@ -5665,11 +5657,11 @@ export default function App() {
             draftSaving={draftSaving}
             draftTitle={draftTitle}
             setDraftTitle={setDraftTitle}
-            createChapterAndSwitchRef={createChapterAndSwitchRef}
-            moveActiveChapterRef={moveActiveChapterRef}
+            onCreateChapterAndSwitch={createChapterAndSwitch}
+            onMoveActiveChapter={moveActiveChapter}
             canMoveChapterUp={canMoveChapterUp}
             canMoveChapterDown={canMoveChapterDown}
-            deleteActiveChapterRef={deleteActiveChapterRef}
+            onDeleteActiveChapter={deleteActiveChapter}
             awarenessTags={awarenessTags}
             draftFocusMode={draftFocusMode}
             autoSaveState={autoSaveState}
@@ -5692,7 +5684,7 @@ export default function App() {
             rejectGhostTextRef={rejectGhostTextRef}
             regenerateGhostTextRef={regenerateGhostTextRef}
             onToggleGhostAuto={toggleGhostAuto}
-            saveDraftSnapshotRef={saveDraftSnapshotRef}
+            onSaveDraftSnapshot={saveDraftSnapshot}
             refreshDraftSnapshotRef={refreshDraftSnapshotRef}
             projectId={projectId}
             fillPromptFromSelectionRef={fillPromptFromSelectionRef}
