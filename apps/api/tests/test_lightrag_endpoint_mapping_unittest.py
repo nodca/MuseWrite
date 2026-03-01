@@ -60,7 +60,7 @@ class LightRAGEndpointMappingTestCase(unittest.TestCase):
     def _auth_header() -> dict[str, str]:
         return {"Authorization": "Bearer human-token"}
 
-    @patch("app.api.endpoints.chat.insert_text_document")
+    @patch("app.api.endpoints.chat_documents.insert_text_document")
     def test_documents_text_value_error_maps_to_400(self, mock_insert_text) -> None:
         mock_insert_text.side_effect = ValueError("invalid text payload")
         response = self.client.post(
@@ -71,7 +71,7 @@ class LightRAGEndpointMappingTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json().get("detail"), "invalid text payload")
 
-    @patch("app.api.endpoints.chat.insert_text_document")
+    @patch("app.api.endpoints.chat_documents.insert_text_document")
     def test_documents_text_runtime_error_maps_to_502(self, mock_insert_text) -> None:
         mock_insert_text.side_effect = RuntimeError("upstream unavailable")
         response = self.client.post(
@@ -82,7 +82,7 @@ class LightRAGEndpointMappingTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json().get("detail"), "upstream unavailable")
 
-    @patch("app.api.endpoints.chat.list_project_documents")
+    @patch("app.api.endpoints.chat_documents.list_project_documents")
     def test_documents_paginated_runtime_error_maps_to_502(self, mock_list_documents) -> None:
         mock_list_documents.side_effect = RuntimeError("list failed")
         response = self.client.post(
@@ -93,7 +93,7 @@ class LightRAGEndpointMappingTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json().get("detail"), "list failed")
 
-    @patch("app.api.endpoints.chat.delete_documents")
+    @patch("app.api.endpoints.chat_documents.delete_documents")
     def test_documents_delete_value_error_maps_to_400(self, mock_delete_documents) -> None:
         mock_delete_documents.side_effect = ValueError("invalid doc ids")
         response = self.client.request(
@@ -105,7 +105,7 @@ class LightRAGEndpointMappingTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json().get("detail"), "invalid doc ids")
 
-    @patch("app.api.endpoints.chat.delete_documents")
+    @patch("app.api.endpoints.chat_documents.delete_documents")
     def test_documents_delete_runtime_error_maps_to_502(self, mock_delete_documents) -> None:
         mock_delete_documents.side_effect = RuntimeError("delete failed")
         response = self.client.request(
@@ -117,7 +117,7 @@ class LightRAGEndpointMappingTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json().get("detail"), "delete failed")
 
-    @patch("app.api.endpoints.chat.get_pipeline_status")
+    @patch("app.api.endpoints.chat_documents.get_pipeline_status")
     def test_documents_pipeline_status_runtime_error_maps_to_502(self, mock_get_pipeline_status) -> None:
         mock_get_pipeline_status.side_effect = RuntimeError("pipeline status failed")
         response = self.client.get(
