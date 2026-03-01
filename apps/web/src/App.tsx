@@ -3371,7 +3371,6 @@ export default function App() {
   const acceptGhostTextRef = useRef<() => void>(() => undefined);
   const rejectGhostTextRef = useRef<() => void>(() => undefined);
   const regenerateGhostTextRef = useRef<() => Promise<void>>(async () => undefined);
-  const refreshGraphTimelineRef = useRef<(chapterIndex: number) => Promise<void>>(async () => undefined);
   const actionLogsCacheRef = useRef<Map<number, ActionAuditLog[]>>(new Map());
   const actionLogsInFlightRef = useRef<Map<number, Promise<ActionAuditLog[]>>>(new Map());
   const actionLogsRequestSeqRef = useRef(0);
@@ -5490,8 +5489,6 @@ export default function App() {
       setConsistencyAuditRunning(false);
     }
   };
-
-  refreshGraphTimelineRef.current = refreshGraphTimeline;
 
   return (
     <div
