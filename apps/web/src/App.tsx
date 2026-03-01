@@ -1295,13 +1295,13 @@ const ChapterOutlineList = memo(function ChapterOutlineList({
 type DraftRevisionListProps = {
   draftRevisions: ProjectChapterRevision[];
   disabled: boolean;
-  rollbackDraftToVersionRef: { current: (targetVersion: number) => Promise<void> };
+  onRollbackDraftToVersion: (targetVersion: number) => Promise<void>;
 };
 
 const DraftRevisionList = memo(function DraftRevisionList({
   draftRevisions,
   disabled,
-  rollbackDraftToVersionRef,
+  onRollbackDraftToVersion,
 }: DraftRevisionListProps) {
   return (
     <details className="draft-history">
@@ -1327,7 +1327,7 @@ const DraftRevisionList = memo(function DraftRevisionList({
             <div className="action-ops">
               <button
                 className="btn ghost tiny"
-                onClick={() => void rollbackDraftToVersionRef.current(revision.version)}
+                onClick={() => void onRollbackDraftToVersion(revision.version)}
                 disabled={disabled}
               >
                 回滚到此版本
@@ -1736,10 +1736,10 @@ type DraftWorkspacePanelProps = {
   regenerateGhostTextRef: { current: () => Promise<void> };
   onToggleGhostAuto: () => void;
   onSaveDraftSnapshot: () => Promise<void>;
-  refreshDraftSnapshotRef: { current: (nextProjectId: number, preferredChapterId?: number | null) => Promise<void> };
+  onRefreshDraftSnapshot: (nextProjectId: number, preferredChapterId?: number | null) => Promise<void>;
   projectId: number;
-  fillPromptFromSelectionRef: { current: (mode: "polish" | "expand") => void };
-  applyAssistantToDraftRef: { current: (mode: "insert" | "replace") => void };
+  onFillPromptFromSelection: (mode: "polish" | "expand") => void;
+  onApplyAssistantToDraft: (mode: "insert" | "replace") => void;
   selectedDraftText: string;
   latestAssistantReply: string;
   chapterOutlines: ChapterOutlineEntry[];
@@ -1748,7 +1748,7 @@ type DraftWorkspacePanelProps = {
   handleOutlineDragEndRef: { current: () => void };
   reorderByDragRef: { current: (targetChapterId: number) => Promise<void> };
   draftRevisions: ProjectChapterRevision[];
-  rollbackDraftToVersionRef: { current: (targetVersion: number) => Promise<void> };
+  onRollbackDraftToVersion: (targetVersion: number) => Promise<void>;
 };
 
 const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
@@ -1790,10 +1790,10 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   regenerateGhostTextRef,
   onToggleGhostAuto,
   onSaveDraftSnapshot,
-  refreshDraftSnapshotRef,
+  onRefreshDraftSnapshot,
   projectId,
-  fillPromptFromSelectionRef,
-  applyAssistantToDraftRef,
+  onFillPromptFromSelection,
+  onApplyAssistantToDraft,
   selectedDraftText,
   latestAssistantReply,
   chapterOutlines,
@@ -1802,7 +1802,7 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   handleOutlineDragEndRef,
   reorderByDragRef,
   draftRevisions,
-  rollbackDraftToVersionRef,
+  onRollbackDraftToVersion,
 }: DraftWorkspacePanelProps) {
   const ghostPreviewKey = useMemo(() => {
     const trimmed = ghostText.trim();
@@ -1984,21 +1984,21 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
         </button>
         <button
           className="btn ghost tiny"
-          onClick={() => void refreshDraftSnapshotRef.current(projectId, activeChapterId)}
+          onClick={() => void onRefreshDraftSnapshot(projectId, activeChapterId)}
           disabled={draftSaving || draftLoading}
         >
           拉取服务器版本
         </button>
-        <button className="btn ghost tiny" onClick={() => fillPromptFromSelectionRef.current("polish")}>
+        <button className="btn ghost tiny" onClick={() => onFillPromptFromSelection("polish")}>
           润色选中
         </button>
-        <button className="btn ghost tiny" onClick={() => fillPromptFromSelectionRef.current("expand")}>
+        <button className="btn ghost tiny" onClick={() => onFillPromptFromSelection("expand")}>
           扩写选中
         </button>
-        <button className="btn primary tiny" onClick={() => applyAssistantToDraftRef.current("insert")}>
+        <button className="btn primary tiny" onClick={() => onApplyAssistantToDraft("insert")}>
           插入助手回复
         </button>
-        <button className="btn ghost tiny" onClick={() => applyAssistantToDraftRef.current("replace")}>
+        <button className="btn ghost tiny" onClick={() => onApplyAssistantToDraft("replace")}>
           替换选中为助手回复
         </button>
       </div>
@@ -2025,7 +2025,7 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
       <DraftRevisionList
         draftRevisions={draftRevisions}
         disabled={draftSaving || draftLoading}
-        rollbackDraftToVersionRef={rollbackDraftToVersionRef}
+        onRollbackDraftToVersion={onRollbackDraftToVersion}
       />
     </section>
   );
@@ -3375,12 +3375,6 @@ export default function App() {
   const reorderByDragRef = useRef<(targetChapterId: number) => Promise<void>>(async () => undefined);
   const handleOutlineDragStartRef = useRef<(chapterId: number) => void>(() => undefined);
   const handleOutlineDragEndRef = useRef<() => void>(() => undefined);
-  const rollbackDraftToVersionRef = useRef<(targetVersion: number) => Promise<void>>(async () => undefined);
-  const refreshDraftSnapshotRef = useRef<
-    (nextProjectId: number, preferredChapterId?: number | null) => Promise<void>
-  >(async () => undefined);
-  const fillPromptFromSelectionRef = useRef<(mode: "polish" | "expand") => void>(() => undefined);
-  const applyAssistantToDraftRef = useRef<(mode: "insert" | "replace") => void>(() => undefined);
   const refreshGraphTimelineRef = useRef<(chapterIndex: number) => Promise<void>>(async () => undefined);
   const actionLogsCacheRef = useRef<Map<number, ActionAuditLog[]>>(new Map());
   const actionLogsInFlightRef = useRef<Map<number, Promise<ActionAuditLog[]>>>(new Map());
@@ -5505,10 +5499,6 @@ export default function App() {
   reorderByDragRef.current = reorderByDrag;
   handleOutlineDragStartRef.current = handleOutlineDragStart;
   handleOutlineDragEndRef.current = handleOutlineDragEnd;
-  rollbackDraftToVersionRef.current = rollbackDraftToVersion;
-  refreshDraftSnapshotRef.current = refreshDraftSnapshot;
-  fillPromptFromSelectionRef.current = fillPromptFromSelection;
-  applyAssistantToDraftRef.current = applyAssistantToDraft;
   refreshGraphTimelineRef.current = refreshGraphTimeline;
 
   return (
@@ -5685,10 +5675,10 @@ export default function App() {
             regenerateGhostTextRef={regenerateGhostTextRef}
             onToggleGhostAuto={toggleGhostAuto}
             onSaveDraftSnapshot={saveDraftSnapshot}
-            refreshDraftSnapshotRef={refreshDraftSnapshotRef}
+            onRefreshDraftSnapshot={refreshDraftSnapshot}
             projectId={projectId}
-            fillPromptFromSelectionRef={fillPromptFromSelectionRef}
-            applyAssistantToDraftRef={applyAssistantToDraftRef}
+            onFillPromptFromSelection={fillPromptFromSelection}
+            onApplyAssistantToDraft={applyAssistantToDraft}
             selectedDraftText={selectedDraftText}
             latestAssistantReply={latestAssistantReply}
             chapterOutlines={chapterOutlines}
@@ -5697,7 +5687,7 @@ export default function App() {
             handleOutlineDragEndRef={handleOutlineDragEndRef}
             reorderByDragRef={reorderByDragRef}
             draftRevisions={draftRevisions}
-            rollbackDraftToVersionRef={rollbackDraftToVersionRef}
+            onRollbackDraftToVersion={rollbackDraftToVersion}
           />
         </>
       ) : null}
