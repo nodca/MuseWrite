@@ -133,9 +133,9 @@ export type PromptWorkshopPanelProps = {
   activePromptTemplateId: number | null;
   templateSaving: boolean;
   promptTemplates: PromptTemplate[];
-  handleActiveTemplateChangeRef: { current: (value: string) => void };
-  startCreateTemplateDraftRef: { current: () => void };
-  copyTemplateDraftRef: { current: () => Promise<void> };
+  onHandleActiveTemplateChange: (value: string) => void;
+  onStartCreateTemplateDraft: () => void;
+  onCopyTemplateDraft: () => Promise<void>;
   templateName: string;
   setTemplateName: (value: string) => void;
   templateSystemPrompt: string;
@@ -148,10 +148,10 @@ export type PromptWorkshopPanelProps = {
   cards: StoryCard[];
   templateKnowledgeCardIds: number[];
   setTemplateKnowledgeCardIds: (value: number[]) => void;
-  saveTemplateDraftRef: { current: () => Promise<void> };
+  onSaveTemplateDraft: () => Promise<void>;
   templateDraftId: number | null;
-  deleteTemplateDraftRef: { current: () => Promise<void> };
-  refreshProjectSnapshotRef: { current: (projectId: number) => Promise<void> };
+  onDeleteTemplateDraft: () => Promise<void>;
+  onRefreshProjectSnapshot: (projectId: number) => Promise<void>;
   projectId: number;
   selectedKnowledgeSettings: SettingEntry[];
   selectedKnowledgeCards: StoryCard[];
@@ -160,7 +160,7 @@ export type PromptWorkshopPanelProps = {
   missingCardIds: number[];
   templateRevisions: PromptTemplateRevision[];
   templateRevisionsLoading: boolean;
-  rollbackTemplateToVersionRef: { current: (targetVersion: number) => Promise<void> };
+  onRollbackTemplateToVersion: (targetVersion: number) => Promise<void>;
 };
 
 export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
@@ -168,9 +168,9 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
   activePromptTemplateId,
   templateSaving,
   promptTemplates,
-  handleActiveTemplateChangeRef,
-  startCreateTemplateDraftRef,
-  copyTemplateDraftRef,
+  onHandleActiveTemplateChange,
+  onStartCreateTemplateDraft,
+  onCopyTemplateDraft,
   templateName,
   setTemplateName,
   templateSystemPrompt,
@@ -183,10 +183,10 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
   cards,
   templateKnowledgeCardIds,
   setTemplateKnowledgeCardIds,
-  saveTemplateDraftRef,
+  onSaveTemplateDraft,
   templateDraftId,
-  deleteTemplateDraftRef,
-  refreshProjectSnapshotRef,
+  onDeleteTemplateDraft,
+  onRefreshProjectSnapshot,
   projectId,
   selectedKnowledgeSettings,
   selectedKnowledgeCards,
@@ -195,7 +195,7 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
   missingCardIds,
   templateRevisions,
   templateRevisionsLoading,
-  rollbackTemplateToVersionRef,
+  onRollbackTemplateToVersion,
 }: PromptWorkshopPanelProps) {
   return (
     <section className="panel prompt-panel">
@@ -211,7 +211,7 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
           会话模板
           <select
             value={activePromptTemplateId ?? ""}
-            onChange={(event) => handleActiveTemplateChangeRef.current(event.target.value)}
+            onChange={(event) => onHandleActiveTemplateChange(event.target.value)}
             disabled={templateSaving}
           >
             <option value="">不使用模板</option>
@@ -222,10 +222,10 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
             ))}
           </select>
         </label>
-        <button className="btn ghost tiny" onClick={startCreateTemplateDraftRef.current} disabled={templateSaving}>
+        <button className="btn ghost tiny" onClick={onStartCreateTemplateDraft} disabled={templateSaving}>
           新建模板草稿
         </button>
-        <button className="btn ghost tiny" onClick={() => void copyTemplateDraftRef.current()} disabled={templateSaving}>
+        <button className="btn ghost tiny" onClick={() => void onCopyTemplateDraft()} disabled={templateSaving}>
           复制当前模板
         </button>
       </div>
@@ -305,19 +305,19 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
       </div>
 
       <div className="draft-actions">
-        <button className="btn primary tiny" onClick={() => void saveTemplateDraftRef.current()} disabled={templateSaving}>
+        <button className="btn primary tiny" onClick={() => void onSaveTemplateDraft()} disabled={templateSaving}>
           {templateSaving ? "保存中..." : templateDraftId ? "更新模板" : "创建模板"}
         </button>
         <button
           className="btn ghost tiny"
-          onClick={() => void deleteTemplateDraftRef.current()}
+          onClick={() => void onDeleteTemplateDraft()}
           disabled={templateSaving || !templateDraftId}
         >
           删除当前草稿模板
         </button>
         <button
           className="btn ghost tiny"
-          onClick={() => void refreshProjectSnapshotRef.current(projectId)}
+          onClick={() => void onRefreshProjectSnapshot(projectId)}
           disabled={templateSaving}
         >
           刷新模板列表
@@ -357,7 +357,7 @@ export const PromptWorkshopPanel = memo(function PromptWorkshopPanel({
               <div className="action-ops">
                 <button
                   className="btn ghost tiny"
-                  onClick={() => void rollbackTemplateToVersionRef.current(revision.version)}
+                  onClick={() => void onRollbackTemplateToVersion(revision.version)}
                   disabled={templateSaving || !templateDraftId}
                 >
                   回滚到此版本

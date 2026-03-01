@@ -3381,13 +3381,6 @@ export default function App() {
   const handleOutlineDragStartRef = useRef<(chapterId: number) => void>(() => undefined);
   const handleOutlineDragEndRef = useRef<() => void>(() => undefined);
   const rollbackDraftToVersionRef = useRef<(targetVersion: number) => Promise<void>>(async () => undefined);
-  const handleActiveTemplateChangeRef = useRef<(value: string) => void>(() => undefined);
-  const startCreateTemplateDraftRef = useRef<() => void>(() => undefined);
-  const copyTemplateDraftRef = useRef<() => Promise<void>>(async () => undefined);
-  const saveTemplateDraftRef = useRef<() => Promise<void>>(async () => undefined);
-  const deleteTemplateDraftRef = useRef<() => Promise<void>>(async () => undefined);
-  const refreshProjectSnapshotRef = useRef<(nextProjectId: number) => Promise<void>>(async () => undefined);
-  const rollbackTemplateToVersionRef = useRef<(targetVersion: number) => Promise<void>>(async () => undefined);
   const createChapterAndSwitchRef = useRef<() => Promise<void>>(async () => undefined);
   const moveActiveChapterRef = useRef<(direction: "up" | "down") => Promise<void>>(async () => undefined);
   const deleteActiveChapterRef = useRef<() => Promise<void>>(async () => undefined);
@@ -5526,13 +5519,6 @@ export default function App() {
   handleOutlineDragStartRef.current = handleOutlineDragStart;
   handleOutlineDragEndRef.current = handleOutlineDragEnd;
   rollbackDraftToVersionRef.current = rollbackDraftToVersion;
-  handleActiveTemplateChangeRef.current = handleActiveTemplateChange;
-  startCreateTemplateDraftRef.current = startCreateTemplateDraft;
-  copyTemplateDraftRef.current = copyTemplateDraft;
-  saveTemplateDraftRef.current = saveTemplateDraft;
-  deleteTemplateDraftRef.current = deleteTemplateDraft;
-  refreshProjectSnapshotRef.current = refreshProjectSnapshot;
-  rollbackTemplateToVersionRef.current = rollbackTemplateToVersion;
   createChapterAndSwitchRef.current = createChapterAndSwitch;
   moveActiveChapterRef.current = moveActiveChapter;
   deleteActiveChapterRef.current = deleteActiveChapter;
@@ -5600,9 +5586,9 @@ export default function App() {
                 activePromptTemplateId={activePromptTemplateId}
                 templateSaving={templateSaving}
                 promptTemplates={promptTemplates}
-                handleActiveTemplateChangeRef={handleActiveTemplateChangeRef}
-                startCreateTemplateDraftRef={startCreateTemplateDraftRef}
-                copyTemplateDraftRef={copyTemplateDraftRef}
+                onHandleActiveTemplateChange={handleActiveTemplateChange}
+                onStartCreateTemplateDraft={startCreateTemplateDraft}
+                onCopyTemplateDraft={copyTemplateDraft}
                 templateName={templateName}
                 setTemplateName={setTemplateName}
                 templateSystemPrompt={templateSystemPrompt}
@@ -5615,10 +5601,10 @@ export default function App() {
                 cards={cards}
                 templateKnowledgeCardIds={templateKnowledgeCardIds}
                 setTemplateKnowledgeCardIds={setTemplateKnowledgeCardIds}
-                saveTemplateDraftRef={saveTemplateDraftRef}
+                onSaveTemplateDraft={saveTemplateDraft}
                 templateDraftId={templateDraftId}
-                deleteTemplateDraftRef={deleteTemplateDraftRef}
-                refreshProjectSnapshotRef={refreshProjectSnapshotRef}
+                onDeleteTemplateDraft={deleteTemplateDraft}
+                onRefreshProjectSnapshot={refreshProjectSnapshot}
                 projectId={projectId}
                 selectedKnowledgeSettings={selectedKnowledgeSettings}
                 selectedKnowledgeCards={selectedKnowledgeCards}
@@ -5627,7 +5613,7 @@ export default function App() {
                 missingCardIds={missingCardIds}
                 templateRevisions={templateRevisions}
                 templateRevisionsLoading={templateRevisionsLoading}
-                rollbackTemplateToVersionRef={rollbackTemplateToVersionRef}
+                onRollbackTemplateToVersion={rollbackTemplateToVersion}
               />
             </Suspense>
           ) : null}
