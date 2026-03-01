@@ -71,37 +71,28 @@ class LightRAGDocumentsServiceTestCase(unittest.TestCase):
         self.assertEqual(doc_ids, ["d1", "d2"])
 
     @patch("app.services.lightrag_documents._request_json")
-    def test_delete_documents_falls_back_to_per_doc_mode(self, mock_request_json) -> None:
-        mock_request_json.side_effect = [
-            RuntimeError("batch-shape-mismatch"),
-            {"status": "ok", "deleted": True, "doc_id": "a"},
-            {"status": "ok", "deleted": True, "doc_id": "b"},
-        ]
+    def test_delete_documents_uses_batch_mode(self, mock_request_json) -> None:
+        mock_request_json.return_value = {"status": "ok", "deleted": 2}
         result = docs.delete_documents(doc_ids=["a", "b"], delete_file=True, delete_llm_cache=False)
 
         self.assertEqual(result.get("provider"), "lightrag_native")
-        self.assertEqual(result.get("mode"), "per_doc_fallback")
+        self.assertEqual(result.get("mode"), "batch")
         self.assertEqual(int(result.get("requested", 0)), 2)
-        self.assertIn("batch-shape-mismatch", str(result.get("fallback_reason")))
-        results = result.get("results", [])
-        self.assertTrue(isinstance(results, list))
-        self.assertEqual(len(results), 2)
-        self.assertEqual(str(results[0].get("doc_id")), "a")
-        self.assertEqual(str(results[1].get("doc_id")), "b")
+        self.assertEqual(result.get("result"), {"status": "ok", "deleted": 2})
+        self.assertEqual(mock_request_json.call_count, 1)
+        self.assertEqual(mock_request_json.call_args.args[0], "DELETE")
+        payload = mock_request_json.call_args.kwargs.get("json_body", {})
+        self.assertEqual(payload.get("doc_ids"), ["a", "b"])
 
     @patch("app.services.lightrag_documents._request_json")
-    def test_get_pipeline_status_falls_back_to_post_when_get_fails(self, mock_request_json) -> None:
-        mock_request_json.side_effect = [
-            RuntimeError("GET 405"),
-            {"status": "ok", "pipeline": {"queued": 0, "running": 1}},
-        ]
+    def test_get_pipeline_status_uses_get_only(self, mock_request_json) -> None:
+        mock_request_json.return_value = {"status": "ok", "pipeline": {"queued": 0, "running": 1}}
         result = docs.get_pipeline_status()
         self.assertEqual(result.get("status"), "ok")
         pipeline = result.get("pipeline") if isinstance(result.get("pipeline"), dict) else {}
         self.assertEqual(int(pipeline.get("running", -1)), 1)
-        self.assertEqual(mock_request_json.call_count, 2)
+        self.assertEqual(mock_request_json.call_count, 1)
         self.assertEqual(mock_request_json.call_args_list[0].args[0], "GET")
-        self.assertEqual(mock_request_json.call_args_list[1].args[0], "POST")
 
 
 if __name__ == "__main__":

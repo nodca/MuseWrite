@@ -203,35 +203,12 @@ def delete_documents(
         "delete_file": bool(delete_file),
         "delete_llm_cache": bool(delete_llm_cache),
     }
-    try:
-        payload = _request_json(
-            "DELETE",
-            path=settings.lightrag_documents_delete_path,
-            fallback_path="/documents/delete_document",
-            json_body=body,
-        )
-    except RuntimeError as exc:
-        # Compatibility fallback for older payload shapes.
-        results: list[dict[str, Any]] = []
-        for doc_id in normalized:
-            single_payload = _request_json(
-                "DELETE",
-                path=settings.lightrag_documents_delete_path,
-                fallback_path="/documents/delete_document",
-                json_body={
-                    "doc_id": doc_id,
-                    "delete_file": bool(delete_file),
-                    "delete_llm_cache": bool(delete_llm_cache),
-                },
-            )
-            results.append({"doc_id": doc_id, "result": single_payload})
-        return {
-            "provider": "lightrag_native",
-            "mode": "per_doc_fallback",
-            "requested": len(normalized),
-            "results": results,
-            "fallback_reason": str(exc),
-        }
+    payload = _request_json(
+        "DELETE",
+        path=settings.lightrag_documents_delete_path,
+        fallback_path="/documents/delete_document",
+        json_body=body,
+    )
 
     return {
         "provider": "lightrag_native",
@@ -242,15 +219,8 @@ def delete_documents(
 
 
 def get_pipeline_status() -> dict[str, Any]:
-    try:
-        return _request_json(
-            "GET",
-            path=settings.lightrag_documents_pipeline_status_path,
-            fallback_path="/documents/pipeline_status",
-        )
-    except RuntimeError:
-        return _request_json(
-            "POST",
-            path=settings.lightrag_documents_pipeline_status_path,
-            fallback_path="/documents/pipeline_status",
-        )
+    return _request_json(
+        "GET",
+        path=settings.lightrag_documents_pipeline_status_path,
+        fallback_path="/documents/pipeline_status",
+    )
