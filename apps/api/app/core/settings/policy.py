@@ -37,6 +37,7 @@ class PolicySettings:
         "context_compression_reranker_enabled",
         "context_compression_reranker_model",
         "context_compression_reranker_runtime",
+        "context_compression_reranker_trust_remote_code",
         "context_compression_reranker_onnx_path",
         "context_compression_reranker_onnx_provider",
         "context_compression_reranker_device",

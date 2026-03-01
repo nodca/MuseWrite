@@ -211,6 +211,149 @@ _NEGATIVE_CONSTRAINT_RELATION_MARKERS = (
     "不能",
     "不得",
 )
+_LAYERWISE_RERANKER_MODEL_MARKER = "bge-reranker-v2-minicpm-layerwise"
+_LAYERWISE_RERANKER_PROMPT = (
+    "Given a query A and a passage B, determine whether the passage contains "
+    "an answer to the query by providing a prediction of either 'Yes' or 'No'."
+)
+_LAYERWISE_RERANKER_SEPARATOR = "\n"
+_LAYERWISE_RERANKER_CUTOFF_LAYER = 28
+
+
+def _is_layerwise_reranker_model(model_name: str) -> bool:
+    return _LAYERWISE_RERANKER_MODEL_MARKER in str(model_name or "").strip().lower()
+
+
+def _build_layerwise_reranker_batch(
+    *,
+    query: str,
+    lines: list[str],
+    tokenizer: Any,
+    max_length: int,
+    return_tensors: str,
+) -> dict[str, Any] | None:
+    if not lines:
+        return None
+    effective_max_length = max(int(max_length), 64)
+    try:
+        prompt_inputs = tokenizer(
+            _LAYERWISE_RERANKER_PROMPT,
+            return_tensors=None,
+            add_special_tokens=False,
+        )["input_ids"]
+        sep_inputs = tokenizer(
+            _LAYERWISE_RERANKER_SEPARATOR,
+            return_tensors=None,
+            add_special_tokens=False,
+        )["input_ids"]
+    except Exception:
+        return None
+
+    items: list[dict[str, list[int]]] = []
+    for line in lines:
+        try:
+            query_inputs = tokenizer(
+                f"A: {query}",
+                return_tensors=None,
+                add_special_tokens=False,
+                max_length=effective_max_length * 3 // 4,
+                truncation=True,
+            )
+            passage_inputs = tokenizer(
+                f"B: {line}",
+                return_tensors=None,
+                add_special_tokens=False,
+                max_length=effective_max_length,
+                truncation=True,
+            )
+            packed = tokenizer.prepare_for_model(
+                [tokenizer.bos_token_id] + list(query_inputs["input_ids"]),
+                list(sep_inputs) + list(passage_inputs["input_ids"]),
+                truncation="only_second",
+                max_length=effective_max_length,
+                padding=False,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+                add_special_tokens=False,
+            )
+        except Exception:
+            return None
+        input_ids = list(packed.get("input_ids") or []) + list(sep_inputs) + list(prompt_inputs)
+        if not input_ids:
+            return None
+        items.append(
+            {
+                "input_ids": input_ids,
+                "attention_mask": [1] * len(input_ids),
+            }
+        )
+
+    try:
+        return tokenizer.pad(
+            items,
+            padding=True,
+            pad_to_multiple_of=8,
+            return_tensors=return_tensors,
+        )
+    except Exception:
+        return None
+
+
+def _build_reranker_batch(
+    *,
+    query: str,
+    lines: list[str],
+    tokenizer: Any,
+    max_length: int,
+    return_tensors: str,
+    input_format: str,
+) -> dict[str, Any] | None:
+    if input_format == "layerwise":
+        return _build_layerwise_reranker_batch(
+            query=query,
+            lines=lines,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            return_tensors=return_tensors,
+        )
+    try:
+        return tokenizer(
+            [query] * len(lines),
+            lines,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors=return_tensors,
+        )
+    except Exception:
+        return None
+
+
+def _extract_reranker_raw_scores(logits: Any) -> list[float] | None:
+    candidate = logits
+    if isinstance(candidate, (list, tuple)):
+        if not candidate:
+            return None
+        candidate = candidate[0]
+    try:
+        if hasattr(candidate, "detach"):
+            candidate = candidate.detach()
+        if hasattr(candidate, "cpu"):
+            candidate = candidate.cpu()
+        rank = int(candidate.dim()) if hasattr(candidate, "dim") else int(candidate.ndim)
+        if rank == 1:
+            reduced = candidate
+        elif rank == 2:
+            width = int(candidate.shape[1]) if len(candidate.shape) > 1 else 1
+            reduced = candidate[:, -1] if width > 1 else candidate[:, 0]
+        elif rank == 3:
+            reduced = candidate[:, -1, 0]
+        else:
+            return None
+        raw = reduced.tolist() if hasattr(reduced, "tolist") else list(reduced)
+        return [float(item) for item in raw]
+    except Exception:
+        return None
 
 
 def _circuit_breaker_settings(kind: str) -> tuple[int, float, float]:
@@ -2092,6 +2235,7 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
     model_name = str(settings.context_compression_reranker_model or "").strip()
     runtime = str(getattr(settings, "context_compression_reranker_runtime", "onnx") or "onnx").strip().lower()
     trust_remote_code = bool(getattr(settings, "context_compression_reranker_trust_remote_code", False))
+    input_format = "layerwise" if _is_layerwise_reranker_model(model_name) else "pair"
     onnx_path = str(getattr(settings, "context_compression_reranker_onnx_path", "") or "").strip()
     onnx_provider = str(getattr(settings, "context_compression_reranker_onnx_provider", "CPUExecutionProvider") or "").strip()
     requested_device = str(settings.context_compression_reranker_device or "").strip()
@@ -2099,7 +2243,17 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
         return None
     if runtime not in {"onnx", "transformers", "torch", "auto"}:
         runtime = "onnx"
-    cache_key = "|".join([model_name, runtime, onnx_path, onnx_provider, requested_device])
+    cache_key = "|".join(
+        [
+            model_name,
+            runtime,
+            onnx_path,
+            onnx_provider,
+            requested_device,
+            str(int(trust_remote_code)),
+            input_format,
+        ]
+    )
     global _RERANKER_MODEL, _RERANKER_TOKENIZER, _RERANKER_MODEL_NAME, _RERANKER_DEVICE, _RERANKER_RUNTIME, _RERANKER_UNAVAILABLE
     with _CONTEXT_COMPRESSOR_LOCK:
         if (
@@ -2127,6 +2281,7 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
                 _RERANKER_MODEL = {
                     "runtime": "onnx",
                     "session": session,
+                    "input_format": input_format,
                 }
                 _RERANKER_MODEL_NAME = cache_key
                 _RERANKER_DEVICE = provider_name
@@ -2150,24 +2305,36 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
         if runtime in {"transformers", "torch", "auto"}:
             try:
                 import torch
-                from transformers import AutoModelForSequenceClassification, AutoTokenizer
+                from transformers import AutoTokenizer
 
                 resolved_device = _resolve_reranker_device(requested_device, torch_module=torch)
                 tokenizer = AutoTokenizer.from_pretrained(
                     model_name,
                     trust_remote_code=trust_remote_code,
                 )
-                model = AutoModelForSequenceClassification.from_pretrained(
-                    model_name,
-                    trust_remote_code=trust_remote_code,
-                )
+                if input_format == "layerwise":
+                    from transformers import AutoModelForCausalLM
+
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        trust_remote_code=trust_remote_code,
+                    )
+                    runtime_name = "transformers_causallm"
+                else:
+                    from transformers import AutoModelForSequenceClassification
+
+                    model = AutoModelForSequenceClassification.from_pretrained(
+                        model_name,
+                        trust_remote_code=trust_remote_code,
+                    )
+                    runtime_name = "transformers"
                 model.to(resolved_device)
                 model.eval()
                 _RERANKER_TOKENIZER = tokenizer
                 _RERANKER_MODEL = model
                 _RERANKER_MODEL_NAME = cache_key
                 _RERANKER_DEVICE = resolved_device
-                _RERANKER_RUNTIME = "transformers"
+                _RERANKER_RUNTIME = runtime_name
                 _RERANKER_UNAVAILABLE = False
                 return tokenizer, model, resolved_device
             except Exception:
@@ -2200,6 +2367,7 @@ def _score_lines_with_onnx_reranker(
     session: Any,
     batch_size: int,
     max_length: int,
+    input_format: str,
 ) -> list[float] | None:
     try:
         input_names = {str(item.name) for item in session.get_inputs()}
@@ -2212,14 +2380,16 @@ def _score_lines_with_onnx_reranker(
     try:
         for start in range(0, len(lines), batch_size):
             batch_lines = lines[start : start + batch_size]
-            encoded = tokenizer(
-                [query] * len(batch_lines),
-                batch_lines,
-                padding=True,
-                truncation=True,
+            encoded = _build_reranker_batch(
+                query=query,
+                lines=batch_lines,
+                tokenizer=tokenizer,
                 max_length=max_length,
                 return_tensors="np",
+                input_format=input_format,
             )
+            if encoded is None:
+                return None
             ort_inputs: dict[str, Any] = {}
             for key, value in encoded.items():
                 if key not in input_names:
@@ -2233,10 +2403,9 @@ def _score_lines_with_onnx_reranker(
             outputs = session.run(None, ort_inputs)
             if not outputs:
                 return None
-            logits = outputs[0]
-            if hasattr(logits, "ndim") and int(logits.ndim) == 2:
-                logits = logits[:, 0]
-            raw_scores = logits.tolist() if hasattr(logits, "tolist") else list(logits)
+            raw_scores = _extract_reranker_raw_scores(outputs[0])
+            if raw_scores is None:
+                return None
             for value in raw_scores:
                 try:
                     scores.append(_sigmoid(float(value)))
@@ -2261,10 +2430,12 @@ def _score_lines_with_reranker(
     tokenizer, model, device = bundle
     batch_size = max(int(settings.context_compression_reranker_batch_size), 1)
     max_length = max(int(settings.context_compression_reranker_max_length), 64)
+    input_format = "layerwise" if _is_layerwise_reranker_model(str(settings.context_compression_reranker_model or "")) else "pair"
     if isinstance(model, dict) and str(model.get("runtime")) == "onnx":
         session = model.get("session")
         if session is None:
             return None
+        model_input_format = str(model.get("input_format") or input_format)
         return _score_lines_with_onnx_reranker(
             query=query,
             lines=lines,
@@ -2272,6 +2443,7 @@ def _score_lines_with_reranker(
             session=session,
             batch_size=batch_size,
             max_length=max_length,
+            input_format=model_input_format,
         )
 
     try:
@@ -2284,20 +2456,26 @@ def _score_lines_with_reranker(
         with torch.no_grad():
             for start in range(0, len(lines), batch_size):
                 batch_lines = lines[start : start + batch_size]
-                encoded = tokenizer(
-                    [query] * len(batch_lines),
-                    batch_lines,
-                    padding=True,
-                    truncation=True,
+                encoded = _build_reranker_batch(
+                    query=query,
+                    lines=batch_lines,
+                    tokenizer=tokenizer,
                     max_length=max_length,
                     return_tensors="pt",
+                    input_format=input_format,
                 )
+                if encoded is None:
+                    return None
                 encoded = {key: value.to(device) for key, value in encoded.items()}
-                outputs = model(**encoded)
-                logits = outputs.logits
-                if hasattr(logits, "dim") and int(logits.dim()) == 2:
-                    logits = logits[:, 0]
-                raw_scores = logits.detach().cpu().tolist()
+                model_kwargs: dict[str, Any] = {}
+                if input_format == "layerwise":
+                    model_kwargs["return_dict"] = True
+                    model_kwargs["cutoff_layers"] = [_LAYERWISE_RERANKER_CUTOFF_LAYER]
+                outputs = model(**encoded, **model_kwargs)
+                logits = getattr(outputs, "logits", outputs[0] if isinstance(outputs, (list, tuple)) and outputs else outputs)
+                raw_scores = _extract_reranker_raw_scores(logits)
+                if raw_scores is None:
+                    return None
                 for value in raw_scores:
                     try:
                         scores.append(_sigmoid(float(value)))

@@ -51,6 +51,12 @@ services:
       CITATION_MIN_COUNT: ${CITATION_MIN_COUNT:-1}
       CONTEXT_WINDOW_PROFILE: ${CONTEXT_WINDOW_PROFILE:-balanced}
       CONTEXT_COMPRESSION_MODE: ${CONTEXT_COMPRESSION_MODE:-rerank}
+      CONTEXT_COMPRESSION_RERANKER_ENABLED: ${CONTEXT_COMPRESSION_RERANKER_ENABLED:-true}
+      CONTEXT_COMPRESSION_RERANKER_MODEL: ${CONTEXT_COMPRESSION_RERANKER_MODEL:-BAAI/bge-reranker-v2-minicpm-layerwise}
+      CONTEXT_COMPRESSION_RERANKER_RUNTIME: ${CONTEXT_COMPRESSION_RERANKER_RUNTIME:-onnx}
+      CONTEXT_COMPRESSION_RERANKER_TRUST_REMOTE_CODE: ${CONTEXT_COMPRESSION_RERANKER_TRUST_REMOTE_CODE:-true}
+      CONTEXT_COMPRESSION_RERANKER_ONNX_PATH: ${CONTEXT_COMPRESSION_RERANKER_ONNX_PATH:-/app/models/bge-reranker-v2-minicpm-layerwise-int8-onnx/model.onnx}
+      CONTEXT_COMPRESSION_RERANKER_ONNX_PROVIDER: ${CONTEXT_COMPRESSION_RERANKER_ONNX_PROVIDER:-CPUExecutionProvider}
 
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
@@ -60,6 +66,8 @@ services:
       # Optional CI / regression overrides (kept for compatibility)
       RAGAS_GATE_ENABLED: ${RAGAS_GATE_ENABLED:-false}
       RAGAS_THRESHOLD: ${RAGAS_THRESHOLD:-0.55}
+    volumes:
+      - ./apps/api/models:/app/models
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -77,6 +85,8 @@ services:
     command: ["python", "-m", "app.worker"]
     environment:
       <<: *api_worker_common_env
+    volumes:
+      - ./apps/api/models:/app/models
     depends_on:
       postgres:
         condition: service_healthy
