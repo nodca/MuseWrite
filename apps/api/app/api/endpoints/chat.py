@@ -112,7 +112,6 @@ from app.services.chat_service import (
     delete_scene_beat,
     is_entity_merge_action_type,
     is_manual_merge_operator,
-    run_entity_merge_scan,
     get_project_volume,
     set_action_status,
     undo_action_effects,
@@ -141,7 +140,6 @@ from app.services.consistency_audit_service import (
     list_consistency_audit_reports,
     run_consistency_audit,
 )
-from app.services.entity_merge_queue import enqueue_entity_merge_scan_job
 from app.services.index_lifecycle_queue import (
     peek_index_lifecycle_dead_letters,
     pop_index_lifecycle_dead_letters,
@@ -167,6 +165,7 @@ from .chat_helpers import (
     ensure_action_session_access as _ensure_action_access,
     ensure_project_scope_access as _ensure_project_access,
     ensure_session_member_access as _ensure_session_access,
+    execute_entity_merge_scan as _execute_entity_merge_scan,
     filter_project_dead_letters as _filter_project_dead_letters,
     normalize_ghost_suggestion as _normalize_ghost_suggestion,
     replay_dead_letters as _replay_dead_letters,
@@ -1200,38 +1199,18 @@ def scan_entity_merge_candidates(
     principal: AuthPrincipal = Depends(get_current_principal),
 ):
     _ensure_project_access(project_id, principal)
-    if payload.run_mode == "async":
-        manual_job_key = f"entity-merge-manual:{project_id}:{int(uuid4().int % 10_000_000)}"
-        queued = enqueue_entity_merge_scan_job(
-            project_id,
-            operator_id=principal.user_id,
-            reason="manual_scan_request",
-            idempotency_key=manual_job_key,
-            attempt=0,
-            db=db,
-        )
-        return EntityMergeScanResult(
-            project_id=project_id,
-            run_mode="async",
-            queued=queued,
-            result={
-                "status": "queued" if queued else "deduped_or_skipped",
-                "idempotency_key": manual_job_key,
-            },
-        )
-
-    result = run_entity_merge_scan(
-        db,
+    outcome = _execute_entity_merge_scan(
         project_id=project_id,
-        operator_id=principal.user_id,
+        run_mode=payload.run_mode,
         max_proposals=payload.max_proposals,
-        source="manual_scan_api",
+        operator_id=principal.user_id,
+        db=db,
     )
     return EntityMergeScanResult(
         project_id=project_id,
-        run_mode="sync",
-        queued=False,
-        result=result,
+        run_mode=str(outcome.get("run_mode") or "sync"),
+        queued=bool(outcome.get("queued")),
+        result=dict(outcome.get("result") or {}),
     )
 
 

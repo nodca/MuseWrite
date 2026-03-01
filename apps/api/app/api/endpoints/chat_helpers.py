@@ -12,7 +12,9 @@ from app.services.chat_service import (
     get_action_by_id,
     get_session_by_id,
     is_manual_merge_operator,
+    run_entity_merge_scan,
 )
+from app.services.entity_merge_queue import enqueue_entity_merge_scan_job
 from app.services.index_lifecycle_queue import (
     enqueue_index_lifecycle_job,
     push_index_lifecycle_dead_letter,
@@ -322,6 +324,48 @@ def review_graph_candidate_batch(
         "requested_count": len(normalized_fact_keys),
         "reviewed_count": max(int(reviewed_count), 0),
         "fact_keys": reviewed_fact_keys,
+    }
+
+
+def execute_entity_merge_scan(
+    *,
+    project_id: int,
+    run_mode: str,
+    max_proposals: int,
+    operator_id: str,
+    db: Session,
+) -> dict[str, Any]:
+    normalized_mode = str(run_mode or "sync").strip().lower()
+    if normalized_mode == "async":
+        manual_job_key = f"entity-merge-manual:{project_id}:{int(uuid4().int % 10_000_000)}"
+        queued = enqueue_entity_merge_scan_job(
+            project_id,
+            operator_id=operator_id,
+            reason="manual_scan_request",
+            idempotency_key=manual_job_key,
+            attempt=0,
+            db=db,
+        )
+        return {
+            "run_mode": "async",
+            "queued": bool(queued),
+            "result": {
+                "status": "queued" if queued else "deduped_or_skipped",
+                "idempotency_key": manual_job_key,
+            },
+        }
+
+    result = run_entity_merge_scan(
+        db,
+        project_id=project_id,
+        operator_id=operator_id,
+        max_proposals=max_proposals,
+        source="manual_scan_api",
+    )
+    return {
+        "run_mode": "sync",
+        "queued": False,
+        "result": result,
     }
 
 
