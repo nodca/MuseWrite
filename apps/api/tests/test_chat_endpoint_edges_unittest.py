@@ -306,8 +306,8 @@ class ChatEndpointEdgesTestCase(unittest.TestCase):
         self.assertEqual(payload[2].get("mutation_id"), "")
         mock_peek.assert_called_once_with(limit=5)
 
-    @patch("app.api.endpoints.chat.push_index_lifecycle_dead_letter")
-    @patch("app.api.endpoints.chat.enqueue_index_lifecycle_job")
+    @patch("app.api.endpoints.chat_helpers.push_index_lifecycle_dead_letter")
+    @patch("app.api.endpoints.chat_helpers.enqueue_index_lifecycle_job")
     @patch("app.api.endpoints.chat.pop_index_lifecycle_dead_letters")
     def test_replay_dead_letters_reports_replayed_requeue_failed_and_skipped_invalid(
         self,
@@ -367,7 +367,7 @@ class ChatEndpointEdgesTestCase(unittest.TestCase):
         mock_push.assert_called_once()
         self.assertEqual(mock_push.call_args_list[0].args[1], "replay_enqueue_failed")
 
-    @patch("app.api.endpoints.chat.enqueue_index_lifecycle_job")
+    @patch("app.api.endpoints.chat_helpers.enqueue_index_lifecycle_job")
     @patch("app.api.endpoints.chat.pop_index_lifecycle_dead_letters")
     def test_replay_dead_letters_normalizes_minimal_row_defaults(
         self,

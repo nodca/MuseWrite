@@ -85,7 +85,6 @@ from app.services.chat_service import (
     delete_project_chapter,
     create_project_chapter,
     create_session,
-    get_action_by_id,
     get_project_chapter,
     get_prompt_template,
     list_cards,
@@ -144,10 +143,8 @@ from app.services.consistency_audit_service import (
 )
 from app.services.entity_merge_queue import enqueue_entity_merge_scan_job
 from app.services.index_lifecycle_queue import (
-    enqueue_index_lifecycle_job,
     peek_index_lifecycle_dead_letters,
     pop_index_lifecycle_dead_letters,
-    push_index_lifecycle_dead_letter,
 )
 from app.services.lightrag_documents import (
     delete_documents,
@@ -172,8 +169,9 @@ from .chat_helpers import (
     ensure_action_session_access as _ensure_action_access,
     ensure_project_scope_access as _ensure_project_access,
     ensure_session_member_access as _ensure_session_access,
+    filter_project_dead_letters as _filter_project_dead_letters,
     normalize_ghost_suggestion as _normalize_ghost_suggestion,
-    normalize_index_lifecycle_dead_letter_row as _normalize_index_lifecycle_dead_letter_row,
+    replay_dead_letters as _replay_dead_letters,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -1272,18 +1270,11 @@ def index_lifecycle_dead_letters(
         raise HTTPException(status_code=400, detail="project_id is required")
     _ensure_project_access(project_id, principal)
     rows = peek_index_lifecycle_dead_letters(limit=limit)
-    filtered: list[dict] = []
-    for row in rows:
-        normalized_row = _normalize_index_lifecycle_dead_letter_row(
-            row,
-            fallback_operator_id=principal.user_id,
-        )
-        if not isinstance(normalized_row, dict):
-            continue
-        if int(normalized_row.get("project_id", 0)) != int(project_id):
-            continue
-        filtered.append(normalized_row)
-    return filtered
+    return _filter_project_dead_letters(
+        rows,
+        project_id=project_id,
+        fallback_operator_id=principal.user_id,
+    )
 
 
 @router.post("/index-lifecycle/dead-letters/replay", response_model=IndexLifecycleReplayResult)
@@ -1297,75 +1288,19 @@ def replay_index_lifecycle_dead_letters(
     _ensure_project_access(payload.project_id, principal)
     replay_request_id = f"replay-{uuid4().hex[:12]}"
     dead_letters = pop_index_lifecycle_dead_letters(limit=payload.limit, project_id=payload.project_id)
-    replayed = 0
-    requeue_failed = 0
-    skipped_invalid = 0
-
-    for item in dead_letters:
-        normalized_item = _normalize_index_lifecycle_dead_letter_row(
-            item,
-            fallback_operator_id=principal.user_id,
-        )
-        if not isinstance(normalized_item, dict):
-            skipped_invalid += 1
-            continue
-        project_id = int(normalized_item.get("project_id", 0))
-        action_id = int(normalized_item.get("action_id", 0))
-        operator_id = str(normalized_item.get("operator_id") or principal.user_id)
-        reason = str(normalized_item.get("reason") or "unspecified")
-        mutation_id = str(normalized_item.get("mutation_id") or "")
-        expected_version = int(normalized_item.get("expected_version", 0))
-        idempotency_key = str(normalized_item.get("idempotency_key") or "")
-        lifecycle_slot = str(normalized_item.get("lifecycle_slot") or "default")
-        if project_id <= 0:
-            skipped_invalid += 1
-            continue
-
-        queued = enqueue_index_lifecycle_job(
-            project_id=project_id,
-            operator_id=operator_id,
-            reason=reason,
-            action_id=action_id,
-            mutation_id=mutation_id,
-            expected_version=expected_version,
-            idempotency_key=idempotency_key,
-            lifecycle_slot=lifecycle_slot,
-            attempt=0,
-            db=db,
-        )
-        if queued:
-            replayed += 1
-        else:
-            requeue_failed += 1
-            push_index_lifecycle_dead_letter(normalized_item, "replay_enqueue_failed")
-
-        if action_id > 0:
-            action = get_action_by_id(db, action_id)
-            if action:
-                create_action_audit_log(
-                    db=db,
-                    action_id=action.id,
-                    event_type="index_lifecycle_replayed",
-                    operator_id=principal.user_id,
-                    event_payload={
-                        "replay_request_id": replay_request_id,
-                        "queued": queued,
-                        "reason": reason,
-                        "mutation_id": mutation_id,
-                        "expected_version": expected_version,
-                        "job_idempotency_key": idempotency_key,
-                        "lifecycle_slot": lifecycle_slot,
-                        "dead_letter_error": normalized_item.get("error"),
-                        "dead_letter_at": normalized_item.get("dead_letter_at"),
-                    },
-                )
+    counters = _replay_dead_letters(
+        dead_letters=dead_letters,
+        db=db,
+        replay_request_id=replay_request_id,
+        principal_user_id=principal.user_id,
+    )
 
     return IndexLifecycleReplayResult(
         requested=int(payload.limit),
         project_id=payload.project_id,
-        replayed=replayed,
-        requeue_failed=requeue_failed,
-        skipped_invalid=skipped_invalid,
+        replayed=int(counters.get("replayed", 0)),
+        requeue_failed=int(counters.get("requeue_failed", 0)),
+        skipped_invalid=int(counters.get("skipped_invalid", 0)),
         replay_request_id=replay_request_id,
     )
 

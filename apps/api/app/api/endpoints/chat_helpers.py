@@ -12,6 +12,10 @@ from app.services.chat_service import (
     get_action_by_id,
     get_session_by_id,
 )
+from app.services.index_lifecycle_queue import (
+    enqueue_index_lifecycle_job,
+    push_index_lifecycle_dead_letter,
+)
 from app.services.llm_provider import ChatGenerationResult
 
 
@@ -265,3 +269,100 @@ def normalize_ghost_suggestion(value: str) -> str:
     if len(merged) > 200:
         merged = merged[:200].rstrip()
     return merged
+
+
+def filter_project_dead_letters(
+    rows: list[Any],
+    *,
+    project_id: int,
+    fallback_operator_id: str,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        normalized_row = normalize_index_lifecycle_dead_letter_row(
+            row,
+            fallback_operator_id=fallback_operator_id,
+        )
+        if not isinstance(normalized_row, dict):
+            continue
+        if int(normalized_row.get("project_id", 0)) != int(project_id):
+            continue
+        filtered.append(normalized_row)
+    return filtered
+
+
+def replay_dead_letters(
+    *,
+    dead_letters: list[Any],
+    db: Session,
+    replay_request_id: str,
+    principal_user_id: str,
+) -> dict[str, int]:
+    replayed = 0
+    requeue_failed = 0
+    skipped_invalid = 0
+
+    for item in dead_letters:
+        normalized_item = normalize_index_lifecycle_dead_letter_row(
+            item,
+            fallback_operator_id=principal_user_id,
+        )
+        if not isinstance(normalized_item, dict):
+            skipped_invalid += 1
+            continue
+        project_id = int(normalized_item.get("project_id", 0))
+        action_id = int(normalized_item.get("action_id", 0))
+        operator_id = str(normalized_item.get("operator_id") or principal_user_id)
+        reason = str(normalized_item.get("reason") or "unspecified")
+        mutation_id = str(normalized_item.get("mutation_id") or "")
+        expected_version = int(normalized_item.get("expected_version", 0))
+        idempotency_key = str(normalized_item.get("idempotency_key") or "")
+        lifecycle_slot = str(normalized_item.get("lifecycle_slot") or "default")
+        if project_id <= 0:
+            skipped_invalid += 1
+            continue
+
+        queued = enqueue_index_lifecycle_job(
+            project_id=project_id,
+            operator_id=operator_id,
+            reason=reason,
+            action_id=action_id,
+            mutation_id=mutation_id,
+            expected_version=expected_version,
+            idempotency_key=idempotency_key,
+            lifecycle_slot=lifecycle_slot,
+            attempt=0,
+            db=db,
+        )
+        if queued:
+            replayed += 1
+        else:
+            requeue_failed += 1
+            push_index_lifecycle_dead_letter(normalized_item, "replay_enqueue_failed")
+
+        if action_id > 0:
+            action = get_action_by_id(db, action_id)
+            if action:
+                create_action_audit_log(
+                    db=db,
+                    action_id=action.id,
+                    event_type="index_lifecycle_replayed",
+                    operator_id=principal_user_id,
+                    event_payload={
+                        "replay_request_id": replay_request_id,
+                        "queued": queued,
+                        "reason": reason,
+                        "mutation_id": mutation_id,
+                        "expected_version": expected_version,
+                        "job_idempotency_key": idempotency_key,
+                        "lifecycle_slot": lifecycle_slot,
+                        "dead_letter_error": normalized_item.get("error"),
+                        "dead_letter_at": normalized_item.get("dead_letter_at"),
+                    },
+                )
+
+    return {
+        "replayed": replayed,
+        "requeue_failed": requeue_failed,
+        "skipped_invalid": skipped_invalid,
+    }
