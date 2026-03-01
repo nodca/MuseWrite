@@ -141,34 +141,6 @@ def _fact_key(project_id: int, source_norm: str, relation: str, target_norm: str
     return f"fact_{digest[:20]}"
 
 
-def _normalize_rag_item(item: dict[str, Any], index: int) -> dict[str, Any]:
-    snippet = str(
-        item.get("snippet")
-        or item.get("content")
-        or item.get("text")
-        or item.get("chunk")
-        or ""
-    )
-    title = str(item.get("title") or item.get("name") or item.get("source") or f"rag_hit_{index}")
-
-    score = _parse_float(item.get("score", item.get("similarity")))
-    file_path = str(item.get("file_path") or item.get("source") or title).strip()
-    chunk_id = str(item.get("chunk_id") or item.get("id") or index).strip()
-    citation = {"source": file_path, "chunk": chunk_id}
-
-    return {
-        "kind": str(item.get("kind") or item.get("type") or "rag_chunk"),
-        "id": int(item.get("id", index)),
-        "title": title,
-        "score": round(score, 4) if isinstance(score, float) else None,
-        "confidence": round(score, 4) if isinstance(score, float) else None,
-        "snippet": _truncate_text(snippet, 180),
-        "citation": citation,
-        "file_path": file_path,
-        "chunk_id": chunk_id,
-    }
-
-
 def make_graph_candidate(
     source: str,
     relation: str,
@@ -200,61 +172,6 @@ def make_graph_candidate(
         "confidence": confidence_norm,
         "origin": origin,
     }
-
-
-def _normalize_graph_candidate(item: dict[str, Any], index: int, *, origin: str) -> dict[str, Any] | None:
-    source_raw = item.get("source") or item.get("subject") or item.get("head") or item.get("from")
-    target_raw = item.get("target") or item.get("object") or item.get("tail") or item.get("to")
-    relation_raw = item.get("relation") or item.get("predicate") or item.get("rel") or "RELATES_TO"
-    if not isinstance(source_raw, str) or not isinstance(target_raw, str):
-        return None
-
-    confidence = _parse_float(item.get("confidence", item.get("score")))
-    return make_graph_candidate(
-        source_raw,
-        str(relation_raw),
-        target_raw,
-        evidence=str(
-            item.get("evidence")
-            or item.get("snippet")
-            or item.get("content")
-            or item.get("text")
-            or ""
-        ),
-        origin=origin,
-        confidence=confidence,
-        item_id=index,
-    )
-
-
-def _raw_graph_items(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if not isinstance(payload, dict):
-        return []
-
-    for key in ("facts", "triples", "relations", "results", "data", "items", "hits"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            normalized_list: list[dict[str, Any]] = []
-            for item in value:
-                if isinstance(item, dict):
-                    normalized_list.append(item)
-                elif isinstance(item, (list, tuple)) and len(item) >= 3:
-                    normalized_list.append(
-                        {
-                            "source": str(item[0]),
-                            "relation": str(item[1]),
-                            "target": str(item[2]),
-                        }
-                    )
-            if normalized_list:
-                return normalized_list
-        if isinstance(value, dict):
-            nested = _raw_graph_items(value)
-            if nested:
-                return nested
-    return []
 
 
 def _lightrag_relationship_items(payload: Any) -> list[dict[str, Any]]:
@@ -387,57 +304,29 @@ def fetch_lightrag_graph_candidates(
         headers["Authorization"] = f"Bearer {settings.lightrag_api_key}"
     params = {"api_key_header_value": settings.lightrag_api_key} if settings.lightrag_api_key else None
 
-    timeout = httpx.Timeout(float(settings.lightrag_timeout_seconds))
-    with httpx.Client(timeout=timeout) as client:
-        # First, try dedicated extract endpoint (legacy/extended deployments).
-        extract_path = settings.lightrag_extract_path.strip() or "/extract_graph"
-        if extract_path:
-            if not extract_path.startswith("/"):
-                extract_path = "/" + extract_path
-            extract_endpoint = settings.lightrag_base_url.rstrip("/") + extract_path
-            try:
-                extract_resp = client.post(
-                    extract_endpoint,
-                    json={"text": text, "top_k": limit, "pov_anchor": anchor},
-                    headers=headers,
-                    params=params,
-                )
-                if extract_resp.status_code < 400:
-                    extract_payload = extract_resp.json()
-                    raw_items = _raw_graph_items(extract_payload)
-                    if raw_items:
-                        candidates: list[dict[str, Any]] = []
-                        for idx, item in enumerate(raw_items[:limit], start=1):
-                            normalized = _normalize_graph_candidate(item, idx, origin="lightrag_extract")
-                            if normalized:
-                                candidates.append(normalized)
-                        if candidates:
-                            return candidates
-            except Exception:
-                pass
+    if not settings.lightrag_graph_from_query_enabled:
+        return []
 
-        if not settings.lightrag_graph_from_query_enabled:
-            return []
+    query_path = settings.lightrag_query_path.strip() or "/query/data"
+    if not query_path.startswith("/"):
+        query_path = "/" + query_path
+    query_endpoint = settings.lightrag_base_url.rstrip("/") + query_path
 
-        # Fallback for official v1.4+ API: use /query/data relationships as graph evidence.
-        query_path = settings.lightrag_query_path.strip() or "/query/data"
-        if not query_path.startswith("/"):
-            query_path = "/" + query_path
-        query_endpoint = settings.lightrag_base_url.rstrip("/") + query_path
-
-        body = _build_lightrag_query_body(
-            text,
-            mode=(settings.lightrag_graph_query_mode or "global"),
-            top_k=limit,
-            chunk_top_k=max(limit, 8),
-            anchor=anchor,
-        )
-        try:
+    body = _build_lightrag_query_body(
+        text,
+        mode=(settings.lightrag_graph_query_mode or "global"),
+        top_k=limit,
+        chunk_top_k=max(limit, 8),
+        anchor=anchor,
+    )
+    try:
+        timeout = httpx.Timeout(float(settings.lightrag_timeout_seconds))
+        with httpx.Client(timeout=timeout) as client:
             query_resp = client.post(query_endpoint, json=body, headers=headers, params=params)
             query_resp.raise_for_status()
             payload = query_resp.json()
-        except Exception:
-            return []
+    except Exception:
+        return []
 
     relation_items = _lightrag_relationship_items(payload)
     candidates: list[dict[str, Any]] = []
@@ -497,32 +386,7 @@ def fetch_lightrag_semantic_hits(
     if reference_hits:
         return reference_hits
 
-    # Legacy/generic fallback.
-    if isinstance(payload, list):
-        raw_items = payload
-    elif isinstance(payload, dict):
-        raw_items = (
-            payload.get("results")
-            or payload.get("hits")
-            or payload.get("data")
-            or payload.get("items")
-            or []
-        )
-    else:
-        raw_items = []
-
-    if not isinstance(raw_items, list):
-        return []
-
-    hits: list[dict[str, Any]] = []
-    for idx, item in enumerate(raw_items[:limit], start=1):
-        if not isinstance(item, dict):
-            continue
-        normalized = _normalize_rag_item(item, idx)
-        if not normalized["snippet"]:
-            continue
-        hits.append(normalized)
-    return hits
+    return []
 
 
 def merge_graph_candidates(
