@@ -41,19 +41,6 @@ class ModelRuntimeConfig:
     profile_name: str | None = None
 
 
-_RUNTIME_PROVIDER_ALIASES: dict[str, str] = {
-    "openai": "openai_compatible",
-    "openai_compatible": "openai_compatible",
-    "gpt": "openai_compatible",
-    "deepseek": "deepseek",
-    "anthropic": "claude",
-    "claude": "claude",
-    "google": "gemini",
-    "gemini": "gemini",
-    "stub": "stub",
-}
-
-
 def _truncate_text(text: str, max_chars: int) -> str:
     content = (text or "").strip()
     if len(content) <= max_chars:
@@ -111,7 +98,7 @@ def _normalize_runtime_provider(value: str | None) -> str:
     raw = str(value or "").strip().lower()
     if not raw:
         return "stub"
-    return _RUNTIME_PROVIDER_ALIASES.get(raw, raw)
+    return raw
 
 
 def _normalize_runtime_config(
@@ -1436,7 +1423,7 @@ async def generate_tot_brainstorm(
 
     runtime = _normalize_runtime_config(runtime_config)
     provider = _normalize_runtime_provider(runtime.provider) if runtime else (settings.llm_provider or "stub").strip().lower()
-    openai_like = provider in {"openai_compatible", "openai", "gpt", "deepseek"}
+    openai_like = provider in {"openai_compatible", "deepseek"}
     if not openai_like:
         return _heuristic_tot(user_input)
 
@@ -1536,7 +1523,7 @@ async def generate_chat(
 ) -> ChatGenerationResult:
     runtime = _normalize_runtime_config(runtime_config)
     provider = _normalize_runtime_provider(runtime.provider) if runtime else (settings.llm_provider or "stub").strip().lower()
-    if provider in {"openai_compatible", "openai", "gpt"}:
+    if provider == "openai_compatible":
         return await _generate_openai_compatible(
             user_input,
             context=context,
@@ -1560,7 +1547,7 @@ async def generate_chat(
             base_url_override=((runtime.base_url if runtime else None) or settings.deepseek_base_url or settings.llm_base_url),
             api_key_override=((runtime.api_key if runtime else None) or settings.deepseek_api_key or settings.llm_api_key),
         )
-    if provider in {"anthropic", "claude"}:
+    if provider == "claude":
         return await _generate_anthropic(
             user_input,
             context=context,
@@ -1571,7 +1558,7 @@ async def generate_chat(
             base_url_override=((runtime.base_url if runtime else None) or settings.anthropic_base_url),
             api_key_override=((runtime.api_key if runtime else None) or settings.anthropic_api_key or settings.llm_api_key),
         )
-    if provider in {"gemini", "google"}:
+    if provider == "gemini":
         return await _generate_gemini(
             user_input,
             context=context,

@@ -1231,7 +1231,7 @@ class WritingFlowTestCase(unittest.TestCase):
             llm_provider_module._generate_anthropic = fake_anthropic
             llm_provider_module._generate_gemini = fake_gemini
 
-            settings.llm_provider = "gpt"
+            settings.llm_provider = "openai_compatible"
             result_openai = asyncio.run(generate_chat("测试", context={}))
             self.assertEqual(result_openai.usage.get("provider"), "openai_compatible")
 

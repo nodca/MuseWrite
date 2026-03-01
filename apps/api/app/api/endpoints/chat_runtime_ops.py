@@ -86,10 +86,7 @@ def save_project_model_profile(
             provider=payload.provider,
             base_url=payload.base_url,
             api_key=payload.api_key,
-            api_key_supplied=(
-                "api_key" in getattr(payload, "model_fields_set", set())
-                or "api_key" in getattr(payload, "__fields_set__", set())
-            ),
+            api_key_supplied=("api_key" in payload.model_fields_set),
             model=payload.model,
         )
     except ValueError as exc:

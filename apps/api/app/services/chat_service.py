@@ -56,17 +56,9 @@ _INTERNAL_SETTING_PREFIXES: tuple[str, ...] = (
 )
 _MODEL_PROFILE_PREFIX = "llm.profile."
 _MODEL_PROFILE_ACTIVE_KEY = "llm.profile.active"
-_MODEL_PROFILE_PROVIDER_ALIASES: dict[str, str] = {
-    "openai": "openai_compatible",
-    "openai_compatible": "openai_compatible",
-    "gpt": "openai_compatible",
-    "deepseek": "deepseek",
-    "anthropic": "claude",
-    "claude": "claude",
-    "google": "gemini",
-    "gemini": "gemini",
-    "stub": "stub",
-}
+_MODEL_PROFILE_ALLOWED_PROVIDERS: frozenset[str] = frozenset(
+    {"openai_compatible", "deepseek", "claude", "gemini"}
+)
 
 
 def _utc_now() -> datetime:
@@ -2708,10 +2700,9 @@ def _normalize_model_profile_provider(provider: str | None) -> str:
     raw = str(provider or "").strip().lower()
     if not raw:
         raise ValueError("provider is required")
-    normalized = _MODEL_PROFILE_PROVIDER_ALIASES.get(raw)
-    if not normalized:
+    if raw not in _MODEL_PROFILE_ALLOWED_PROVIDERS:
         raise ValueError("provider must be one of openai_compatible/deepseek/claude/gemini")
-    return normalized
+    return raw
 
 
 def _normalize_optional_text(value: str | None, *, max_len: int) -> str | None:
@@ -2820,7 +2811,11 @@ def _model_profile_read_dict(row: SettingEntry, *, active_profile_id: str | None
     profile_id = _extract_model_profile_id_from_key(str(row.key))
     api_key = str(value.get("api_key", "") or "").strip()
     provider_raw = str(value.get("provider") or "openai_compatible").strip().lower()
-    provider = _MODEL_PROFILE_PROVIDER_ALIASES.get(provider_raw, "openai_compatible")
+    provider = (
+        provider_raw
+        if provider_raw in _MODEL_PROFILE_ALLOWED_PROVIDERS
+        else "openai_compatible"
+    )
     name = _normalize_optional_text(value.get("name"), max_len=128) if isinstance(value, dict) else None
     base_url = _normalize_optional_text(value.get("base_url"), max_len=512) if isinstance(value, dict) else None
     model = _normalize_optional_text(value.get("model"), max_len=128) if isinstance(value, dict) else None
@@ -3016,9 +3011,11 @@ def resolve_model_profile_runtime(
         db.commit()
         return None
     value = row.value if isinstance(row.value, dict) else {}
-    provider = _MODEL_PROFILE_PROVIDER_ALIASES.get(
-        str(value.get("provider") or "").strip().lower(),
-        "openai_compatible",
+    provider_raw = str(value.get("provider") or "").strip().lower()
+    provider = (
+        provider_raw
+        if provider_raw in _MODEL_PROFILE_ALLOWED_PROVIDERS
+        else "openai_compatible"
     )
     return {
         "profile_id": resolved_profile_id,
