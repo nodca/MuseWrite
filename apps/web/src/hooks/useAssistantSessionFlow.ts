@@ -10,6 +10,7 @@ import {
   deleteProjectSession,
   preheatContextPack,
   streamChat,
+  toFriendlyErrorMessage,
   updateProjectSession,
   type ChatStreamTimingMetrics,
 } from "../api/chatApi";
@@ -321,11 +322,12 @@ export function useAssistantSessionFlow({
       }
       if (event.type === "error") {
         flushBufferedStreamDelta();
-        setError(event.message);
+        const friendlyMessage = toFriendlyErrorMessage(event.message);
+        setError(friendlyMessage);
         updateMessage(assistantLocalId, (message) => ({
           ...message,
           streaming: false,
-          content: message.content || `模型返回错误：${event.message}`,
+          content: message.content || `模型返回错误：${friendlyMessage}`,
         }));
       }
     },
@@ -434,7 +436,8 @@ export function useAssistantSessionFlow({
       if (streamError instanceof DOMException && streamError.name === "AbortError") {
         return;
       }
-      const message = streamError instanceof Error ? streamError.message : "发送失败，请稍后再试";
+      const rawMessage = streamError instanceof Error ? streamError.message : "发送失败，请稍后再试";
+      const message = toFriendlyErrorMessage(rawMessage);
       flushBufferedStreamDelta();
       setError(message);
       updateMessage(assistantLocalId, (item) => ({

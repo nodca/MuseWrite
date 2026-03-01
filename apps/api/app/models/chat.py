@@ -64,6 +64,25 @@ class ProjectMutationVersion(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class PendingGraphMutation(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("mutation_id", name="uq_pending_graph_mutation_mutation"),
+        Index("ix_pending_graph_mutation_project_status", "project_id", "status"),
+        Index("ix_pending_graph_mutation_action", "action_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(index=True)
+    action_id: int = Field(index=True)
+    mutation_id: str = Field(max_length=128, index=True)
+    expected_version: int = Field(default=0, index=True)
+    status: str = Field(default="pending_queue", max_length=32, index=True)
+    cancel_reason: str = Field(default="", max_length=255)
+    canceled_by_mutation_id: str = Field(default="", max_length=128)
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class AsyncJob(SQLModel, table=True):
     __table_args__ = (
         Index("ix_async_job_queue_status_available", "queue_name", "status", "available_at"),

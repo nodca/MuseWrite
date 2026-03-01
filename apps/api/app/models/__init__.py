@@ -4,6 +4,7 @@ from app.models.chat import (
     ChatAction,
     ChatMessage,
     ChatSession,
+    PendingGraphMutation,
     ProjectMutationVersion,
 )
 from app.models.content import (
@@ -24,6 +25,7 @@ __all__ = [
     "ChatAction",
     "ActionAuditLog",
     "AsyncJob",
+    "PendingGraphMutation",
     "ProjectMutationVersion",
     "SettingEntry",
     "StoryCard",

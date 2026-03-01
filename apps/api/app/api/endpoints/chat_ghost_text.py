@@ -76,16 +76,50 @@ async def generate_ghost_text(
         notes.append(f"prompt_template_id={payload.prompt_template_id} 未命中，已忽略模板风格约束。")
     if template is not None and not payload.style_guard:
         notes.append("style_guard=false，已跳过模板风格约束。")
+    if str(payload.chapter_goal or "").strip():
+        notes.append("已注入当前章节目标（轻量上下文）。")
+    if payload.active_roles:
+        notes.append("已注入活跃角色列表（轻量上下文）。")
 
-    story_outline: dict[str, Any] = {"volume": None, "scene_beat": None}
+    normalized_chapter_goal = str(payload.chapter_goal or "").strip()
+    if len(normalized_chapter_goal) > 220:
+        normalized_chapter_goal = normalized_chapter_goal[:220]
+    normalized_active_roles: list[str] = []
+    seen_roles: set[str] = set()
+    for item in payload.active_roles or []:
+        role = str(item or "").strip()
+        if not role:
+            continue
+        role_key = role.lower()
+        if role_key in seen_roles:
+            continue
+        seen_roles.add(role_key)
+        normalized_active_roles.append(role[:24])
+        if len(normalized_active_roles) >= 8:
+            break
+
+    story_outline: dict[str, Any] = {
+        "volume": None,
+        "scene_beat": None,
+        "chapter_goal": normalized_chapter_goal or None,
+        "active_roles": normalized_active_roles,
+    }
     outline_context_meta: dict[str, Any] = {
         "enabled": False,
         "reason": "chapter_not_requested",
         "requested_chapter_id": payload.chapter_id,
         "requested_scene_beat_id": payload.scene_beat_id,
         "selected_scene_beat_id": None,
+        "chapter_goal_injected": bool(normalized_chapter_goal),
+        "active_roles_injected": len(normalized_active_roles),
     }
     outline_hint_parts: list[str] = []
+    if normalized_chapter_goal:
+        outline_hint_parts.append(f"当前章节目标：{normalized_chapter_goal}")
+        outline_context_meta["enabled"] = True
+    if normalized_active_roles:
+        outline_hint_parts.append(f"活跃角色：{'、'.join(normalized_active_roles)}")
+        outline_context_meta["enabled"] = True
     chapter_for_context = None
     if payload.chapter_id is not None:
         chapter = get_project_chapter(db, payload.project_id, payload.chapter_id)

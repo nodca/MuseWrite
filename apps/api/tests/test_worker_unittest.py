@@ -8,7 +8,7 @@ from sqlmodel import SQLModel, Session, create_engine
 
 from app import worker as worker_module
 from app.core.config import settings
-from app.models.chat import ChatAction, ChatSession, ProjectMutationVersion
+from app.models.chat import ChatAction, ChatSession, PendingGraphMutation, ProjectMutationVersion
 
 
 def _mock_project_lock(acquired: bool):
@@ -87,6 +87,30 @@ class WorkerTestCase(unittest.TestCase):
     def _set_project_version(self, project_id: int, version: int) -> None:
         with Session(self.engine) as db:
             row = ProjectMutationVersion(project_id=project_id, version=version)
+            db.add(row)
+            db.commit()
+
+    def _set_pending_graph_mutation(
+        self,
+        *,
+        project_id: int,
+        action_id: int,
+        mutation_id: str,
+        expected_version: int,
+        status: str,
+        cancel_reason: str = "",
+        canceled_by_mutation_id: str = "",
+    ) -> None:
+        with Session(self.engine) as db:
+            row = PendingGraphMutation(
+                project_id=project_id,
+                action_id=action_id,
+                mutation_id=mutation_id,
+                expected_version=expected_version,
+                status=status,
+                cancel_reason=cancel_reason,
+                canceled_by_mutation_id=canceled_by_mutation_id,
+            )
             db.add(row)
             db.commit()
 
@@ -188,6 +212,43 @@ class WorkerTestCase(unittest.TestCase):
         payload = mock_audit.call_args.kwargs.get("event_payload", {})
         self.assertEqual(payload.get("reason"), "already_synced")
         self.assertEqual(payload.get("mutation_id"), "m-1")
+
+    def test_process_graph_job_drops_when_pending_mutation_canceled(self) -> None:
+        mutation_id = "m-canceled-1"
+        action_id = self._create_action(
+            project_id=12,
+            status="applied",
+            apply_result={"graph_sync": {"status": "queued", "mutation_id": mutation_id}},
+        )
+        self._set_pending_graph_mutation(
+            project_id=12,
+            action_id=action_id,
+            mutation_id=mutation_id,
+            expected_version=6,
+            status="canceled",
+            cancel_reason="undo_requested",
+            canceled_by_mutation_id="undo-12-6-abc",
+        )
+        job = {
+            "action_id": action_id,
+            "project_id": 12,
+            "attempt": 1,
+            "mutation_id": mutation_id,
+            "expected_version": 6,
+            "idempotency_key": "idem-canceled",
+        }
+
+        with patch("app.worker.create_action_audit_log") as mock_audit, patch(
+            "app.worker.process_graph_sync_for_action"
+        ) as mock_sync:
+            result, attempt = worker_module._process_graph_job(job)
+
+        self.assertEqual(result, "drop_stale")
+        self.assertEqual(attempt, 1)
+        mock_sync.assert_not_called()
+        payload = mock_audit.call_args.kwargs.get("event_payload", {})
+        self.assertEqual(payload.get("reason"), "canceled_before_worker_execute")
+        self.assertEqual(payload.get("mutation_id"), mutation_id)
 
     def test_requeue_index_lifecycle_job_max_retries_marks_failed_and_dead_letters(self) -> None:
         settings.index_lifecycle_max_retries = 2

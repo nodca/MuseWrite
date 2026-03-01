@@ -6,6 +6,7 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import { FixedSizeList, type ListChildComponentProps } from "react-window";
 import { useShallow } from "zustand/react/shallow";
 import {
   createForeshadowingCard,
@@ -56,6 +57,8 @@ import {
 } from "./api/chatApi";
 import { useChatStore } from "./store/chatStore";
 import { ModeSwitch } from "./components/ModeSwitch";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import type { WorkbenchPanelVisibility } from "./components/ProWorkspaceMode";
 import {
   clearDraftRecoverySnapshot,
   readDraftRecoverySnapshot,
@@ -136,7 +139,29 @@ type PlanningSnapshotData = {
   overdue: ForeshadowingCard[];
 };
 
+type StreamLatencySample = {
+  at: string;
+  completeMs: number;
+};
+
+type TokenUsageSample = {
+  at: string;
+  total: number;
+};
+
+type RetrievalHitSample = {
+  at: string;
+  dsl: number;
+  graph: number;
+  rag: number;
+};
+
 const POST_CHAT_SNAPSHOT_TTL_MS = 400;
+const CHAPTER_OUTLINE_ROW_HEIGHT = 106;
+const CHAPTER_OUTLINE_MAX_HEIGHT = 424;
+const CHAPTER_OUTLINE_OVERSCAN = 6;
+const ACTION_FLOW_GUIDE_SEEN_KEY = "novel-platform:action-flow-guide:seen:v1";
+const PERFORMANCE_SAMPLE_LIMIT = 60;
 type WritingTheme = "paper" | "wenkai" | "modern" | "contrast";
 
 function toUiMessage(message: {
@@ -166,6 +191,43 @@ function formatDateTime(value?: string | null): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleString();
+}
+
+function isSameLocalDate(value: string | null | undefined, anchorDate: Date): boolean {
+  if (!value) return false;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return (
+    parsed.getFullYear() === anchorDate.getFullYear() &&
+    parsed.getMonth() === anchorDate.getMonth() &&
+    parsed.getDate() === anchorDate.getDate()
+  );
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function computePercentile(values: number[], percentile: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1));
+  return sorted[index];
+}
+
+function formatMs(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "--";
+  return `${Math.round(value)}ms`;
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0%";
+  return `${Math.round(value)}%`;
 }
 
 function normalizeEditorText(value: string): string {
@@ -538,6 +600,31 @@ function isEntityMergeActionType(actionType: string): boolean {
   return normalized.startsWith("entity.merge") || normalized.startsWith("graph.entity.merge");
 }
 
+type ActionIntent = "create" | "update" | "delete";
+
+function resolveActionIntent(actionType: string): ActionIntent {
+  const normalized = (actionType || "").trim().toLowerCase();
+  if (normalized.includes("delete")) return "delete";
+  if (normalized.includes("create")) return "create";
+  return "update";
+}
+
+function resolveActionIntentLabel(intent: ActionIntent): string {
+  if (intent === "create") return "创建";
+  if (intent === "delete") return "删除";
+  return "修改";
+}
+
+function resolveActionStatusLabel(status: string): string {
+  const normalized = (status || "").trim().toLowerCase();
+  if (normalized === "proposed") return "AI 建议";
+  if (normalized === "applied" || normalized === "confirmed") return "已应用";
+  if (normalized === "undone") return "已撤销";
+  if (normalized === "rejected") return "已忽略";
+  if (normalized === "failed") return "执行失败";
+  return status;
+}
+
 function collectEntityMergePayloadAliases(payload: Record<string, unknown>): string[] {
   const rawItems: unknown[] = [];
   for (const key of ["alias", "source_entity", "source_alias", "candidate_alias", "from_entity"]) {
@@ -889,66 +976,6 @@ function focusFirstDialogElement(container: HTMLElement): void {
   container.focus();
 }
 
-type WorkspaceStatusBarProps = {
-  uiMode: "writing" | "pro";
-  sessionId: number | null;
-  ghostAutoEnabled: boolean;
-  referenceProjectIds: number[];
-  retrievalDegraded: boolean;
-  degradedReasons: string[];
-  lastStreamMetrics: ChatStreamTimingMetrics | null;
-};
-
-const WorkspaceStatusBar = memo(function WorkspaceStatusBar({
-  uiMode,
-  sessionId,
-  ghostAutoEnabled,
-  referenceProjectIds,
-  retrievalDegraded,
-  degradedReasons,
-  lastStreamMetrics,
-}: WorkspaceStatusBarProps) {
-  const firstTokenLabel =
-    lastStreamMetrics?.firstTokenMs === null || lastStreamMetrics?.firstTokenMs === undefined
-      ? "--"
-      : `${Math.round(lastStreamMetrics.firstTokenMs)}ms`;
-  return (
-    <section className="workspace-bar">
-      <div className="status-chip">
-        <span>当前模式</span>
-        <strong>{uiMode === "writing" ? "写作模式" : "工作台模式"}</strong>
-      </div>
-      <div className="status-chip">
-        <span>会话 ID</span>
-        <strong>{sessionId ?? "未创建"}</strong>
-      </div>
-      <div className="status-chip">
-        <span>Ghost 策略</span>
-        <strong>{ghostAutoEnabled ? "自动触发" : "手动触发"}</strong>
-      </div>
-      <div className="status-chip">
-        <span>引用项目</span>
-        <strong>{referenceProjectIds.length ? referenceProjectIds.join(", ") : "无"}</strong>
-      </div>
-      <div className={`status-chip ${retrievalDegraded ? "warn" : ""}`}>
-        <span>检索状态</span>
-        <strong>{retrievalDegraded ? "已降级（不中断写作）" : "正常"}</strong>
-        {uiMode === "pro" && degradedReasons.length > 0 ? (
-          <small>{degradedReasons.slice(0, 2).join(" / ")}</small>
-        ) : null}
-      </div>
-      <div className="status-chip">
-        <span>Stream 指标</span>
-        {lastStreamMetrics ? (
-          <strong>{`TTFB ${Math.round(lastStreamMetrics.ttfbMs)}ms / 首 token ${firstTokenLabel}`}</strong>
-        ) : (
-          <strong>未采样</strong>
-        )}
-      </div>
-    </section>
-  );
-});
-
 type LazyPanelFallbackProps = {
   title: string;
   detail: string;
@@ -967,19 +994,19 @@ const LazyPanelFallback = memo(function LazyPanelFallback({ title, detail, class
   );
 });
 
-const LazyDebugSnapshotGrid = lazy(async () => {
-  const module = await import("./debugPanels");
-  return { default: module.DebugSnapshotGrid };
-});
-
-const LazyPromptWorkshopPanel = lazy(async () => {
-  const module = await import("./debugPanels");
-  return { default: module.PromptWorkshopPanel };
-});
-
 const LazyGraphCandidateReviewPanel = lazy(async () => {
   const module = await import("./debugPanels");
   return { default: module.GraphCandidateReviewPanel };
+});
+
+const LazyWritingWorkspaceMode = lazy(async () => {
+  const module = await import("./components/WritingWorkspaceMode");
+  return { default: module.WritingWorkspaceMode };
+});
+
+const LazyProWorkspaceMode = lazy(async () => {
+  const module = await import("./components/ProWorkspaceMode");
+  return { default: module.ProWorkspaceMode };
 });
 
 type AssistantChatPanelProps = {
@@ -1058,6 +1085,9 @@ const ActionCard = memo(function ActionCard({
   onLoadLogs,
   onMutateAction,
 }: ActionCardProps) {
+  const actionIntent = useMemo(() => resolveActionIntent(action.action_type), [action.action_type]);
+  const actionIntentLabel = useMemo(() => resolveActionIntentLabel(actionIntent), [actionIntent]);
+  const actionStatusLabel = useMemo(() => resolveActionStatusLabel(action.status), [action.status]);
   const summaryLines = useMemo(() => summarizeAction(action), [action]);
   const riskHints = useMemo(() => actionRiskHints(action), [action]);
   const diffRows = useMemo(() => buildActionDiffRows(action), [action]);
@@ -1089,14 +1119,19 @@ const ActionCard = memo(function ActionCard({
     };
   }, []);
 
-  const cardClassName = `action-card${isPending ? " highlight" : ""}${undoFlash ? " undo-flash" : ""}`;
+  const cardClassName = `action-card action-intent-${actionIntent}${isPending ? " highlight" : ""}${
+    undoFlash ? " undo-flash" : ""
+  }${action.status === "applied" ? " is-applied" : ""}`;
 
   return (
     <article className={cardClassName}>
       <button type="button" className="action-summary" onClick={() => void onLoadLogs(action.id)}>
         <span>#{action.id}</span>
-        <strong>{action.action_type}</strong>
-        <span className={`status ${action.status}`}>{action.status}</span>
+        <strong>{`${actionIntentLabel} · ${action.action_type}`}</strong>
+        <div className="action-status-line">
+          <span className={`status ${action.status}`}>{actionStatusLabel}</span>
+          {action.status === "applied" ? <span className="applied-tag">✓ 已应用</span> : null}
+        </div>
       </button>
       <div className="action-summary-body">
         {summaryLines.map((line, idx) => (
@@ -1175,14 +1210,14 @@ const ActionCard = memo(function ActionCard({
               onClick={() => void onMutateAction(action, "apply")}
               disabled={controlsDisabled}
             >
-              应用并记录
+              应用到项目
             </button>
             <button
               className="btn ghost tiny"
               onClick={() => void onMutateAction(action, "reject")}
               disabled={controlsDisabled}
             >
-              不应用
+              暂不采用
             </button>
           </>
         ) : null}
@@ -1237,6 +1272,8 @@ type ChapterOutlineEntry = {
   title: string;
   wordCount: number;
   preview: string;
+  updatedAt: string;
+  progressPercent: number;
 };
 
 type ChapterOutlineListProps = {
@@ -1250,6 +1287,55 @@ type ChapterOutlineListProps = {
   onSelect: (chapterId: number) => Promise<void>;
 };
 
+type ChapterOutlineRowData = {
+  chapterOutlines: ChapterOutlineEntry[];
+  activeChapterId: number | null;
+  dragChapterId: number | null;
+  disabled: boolean;
+  onDragStart: (chapterId: number) => void;
+  onDragEnd: () => void;
+  onReorder: (targetChapterId: number) => Promise<void>;
+  onSelect: (chapterId: number) => Promise<void>;
+};
+
+const ChapterOutlineRow = memo(function ChapterOutlineRow({
+  index,
+  style,
+  data,
+}: ListChildComponentProps<ChapterOutlineRowData>) {
+  const item = data.chapterOutlines[index];
+  if (!item) return null;
+  return (
+    <div style={style} className="chapter-outline-row">
+      <button
+        type="button"
+        draggable
+        className={`chapter-outline-item ${item.id === data.activeChapterId ? "active" : ""} ${
+          item.id === data.dragChapterId ? "dragging" : ""
+        }`}
+        onDragStart={() => data.onDragStart(item.id)}
+        onDragEnd={data.onDragEnd}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          void data.onReorder(item.id);
+        }}
+        onClick={() => void data.onSelect(item.id)}
+        disabled={data.disabled}
+      >
+        <strong>
+          {item.chapterIndex}. {item.title}
+        </strong>
+        <small>{item.wordCount} 字</small>
+        <span>{item.preview}</span>
+        <div className="chapter-outline-progress" aria-hidden="true">
+          <span style={{ width: `${item.progressPercent}%` }} />
+        </div>
+      </button>
+    </div>
+  );
+});
+
 const ChapterOutlineList = memo(function ChapterOutlineList({
   chapterOutlines,
   activeChapterId,
@@ -1260,34 +1346,41 @@ const ChapterOutlineList = memo(function ChapterOutlineList({
   onReorder,
   onSelect,
 }: ChapterOutlineListProps) {
+  const listHeight = Math.min(
+    CHAPTER_OUTLINE_MAX_HEIGHT,
+    Math.max(CHAPTER_OUTLINE_ROW_HEIGHT, chapterOutlines.length * CHAPTER_OUTLINE_ROW_HEIGHT)
+  );
+  const listData = useMemo<ChapterOutlineRowData>(
+    () => ({
+      chapterOutlines,
+      activeChapterId,
+      dragChapterId,
+      disabled,
+      onDragStart,
+      onDragEnd,
+      onReorder,
+      onSelect,
+    }),
+    [chapterOutlines, activeChapterId, dragChapterId, disabled, onDragStart, onDragEnd, onReorder, onSelect]
+  );
+
   return (
     <div className="chapter-outline-list">
       {chapterOutlines.length === 0 ? <p className="empty">暂无章节</p> : null}
-      {chapterOutlines.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          draggable
-          className={`chapter-outline-item ${item.id === activeChapterId ? "active" : ""} ${
-            item.id === dragChapterId ? "dragging" : ""
-          }`}
-          onDragStart={() => onDragStart(item.id)}
-          onDragEnd={onDragEnd}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            void onReorder(item.id);
-          }}
-          onClick={() => void onSelect(item.id)}
-          disabled={disabled}
+      {chapterOutlines.length > 0 ? (
+        <FixedSizeList
+          className="chapter-outline-virtual-list"
+          height={listHeight}
+          width="100%"
+          itemCount={chapterOutlines.length}
+          itemData={listData}
+          itemSize={CHAPTER_OUTLINE_ROW_HEIGHT}
+          itemKey={(index: number, data: ChapterOutlineRowData) => data.chapterOutlines[index]?.id ?? index}
+          overscanCount={CHAPTER_OUTLINE_OVERSCAN}
         >
-          <strong>
-            {item.chapterIndex}. {item.title}
-          </strong>
-          <small>{item.wordCount} 字</small>
-          <span>{item.preview}</span>
-        </button>
-      ))}
+          {ChapterOutlineRow}
+        </FixedSizeList>
+      ) : null}
     </div>
   );
 });
@@ -1340,240 +1433,7 @@ const DraftRevisionList = memo(function DraftRevisionList({
   );
 });
 
-type StoryPlanningPanelProps = {
-  activeChapterId: number | null;
-  volumes: ProjectVolume[];
-  activeVolumeId: number | null;
-  onSelectVolume: (volumeId: number) => void;
-  onCreateVolume: () => Promise<void>;
-  onBindChapterToVolume: (volumeId: number) => Promise<void>;
-  volumeOutlineDraft: string;
-  setVolumeOutlineDraft: (value: string) => void;
-  onSaveVolumeOutline: () => Promise<void>;
-  sceneBeats: SceneBeat[];
-  activeSceneBeatId: number | null;
-  onSelectSceneBeat: (beatId: number | null) => void;
-  newBeatContent: string;
-  setNewBeatContent: (value: string) => void;
-  onCreateSceneBeat: () => Promise<void>;
-  onToggleSceneBeatStatus: (beatId: number, done: boolean) => Promise<void>;
-  onDeleteSceneBeat: (beatId: number) => Promise<void>;
-  foreshadowCards: ForeshadowingCard[];
-  overdueForeshadowCards: ForeshadowingCard[];
-  foreshadowDraftTitle: string;
-  setForeshadowDraftTitle: (value: string) => void;
-  foreshadowDraftDescription: string;
-  setForeshadowDraftDescription: (value: string) => void;
-  onCreateForeshadowCard: () => Promise<void>;
-  onToggleForeshadowStatus: (card: ForeshadowingCard, nextStatus: "open" | "resolved") => Promise<void>;
-  onDeleteForeshadowCard: (cardId: number) => Promise<void>;
-  busy: boolean;
-};
 
-const StoryPlanningPanel = memo(function StoryPlanningPanel({
-  activeChapterId,
-  volumes,
-  activeVolumeId,
-  onSelectVolume,
-  onCreateVolume,
-  onBindChapterToVolume,
-  volumeOutlineDraft,
-  setVolumeOutlineDraft,
-  onSaveVolumeOutline,
-  sceneBeats,
-  activeSceneBeatId,
-  onSelectSceneBeat,
-  newBeatContent,
-  setNewBeatContent,
-  onCreateSceneBeat,
-  onToggleSceneBeatStatus,
-  onDeleteSceneBeat,
-  foreshadowCards,
-  overdueForeshadowCards,
-  foreshadowDraftTitle,
-  setForeshadowDraftTitle,
-  foreshadowDraftDescription,
-  setForeshadowDraftDescription,
-  onCreateForeshadowCard,
-  onToggleForeshadowStatus,
-  onDeleteForeshadowCard,
-  busy,
-}: StoryPlanningPanelProps) {
-  return (
-    <section className="panel planning-panel">
-      <div className="panel-title">
-        <h2>结构化大纲与伏笔</h2>
-        <small>Volume / Scene Beat / Foreshadow</small>
-      </div>
-      <div className="planning-grid">
-        <article className="planning-card">
-          <div className="panel-title sub">
-            <h3>卷纲</h3>
-            <small>{activeVolumeId ? `卷 #${activeVolumeId}` : "未绑定"}</small>
-          </div>
-          <div className="planning-row">
-            <select
-              value={activeVolumeId ?? ""}
-              onChange={(event) => {
-                const nextId = Number(event.target.value || 0);
-                if (!nextId) return;
-                onSelectVolume(nextId);
-                if (activeChapterId) {
-                  void onBindChapterToVolume(nextId);
-                }
-              }}
-              disabled={busy}
-            >
-              <option value="">选择卷</option>
-              {volumes.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.volume_index}. {item.title}
-                </option>
-              ))}
-            </select>
-            <button className="btn ghost tiny" onClick={() => void onCreateVolume()} disabled={busy}>
-              新建卷
-            </button>
-          </div>
-          <textarea
-            rows={4}
-            value={volumeOutlineDraft}
-            onChange={(event) => setVolumeOutlineDraft(event.target.value)}
-            placeholder="卷纲：本卷核心冲突、推进目标与收束点。"
-            disabled={busy || !activeVolumeId}
-          />
-          <div className="planning-row">
-            <button className="btn ghost tiny" onClick={() => void onSaveVolumeOutline()} disabled={busy || !activeVolumeId}>
-              保存卷纲
-            </button>
-          </div>
-        </article>
-
-        <article className="planning-card">
-          <div className="panel-title sub">
-            <h3>Scene Beats</h3>
-            <small>{sceneBeats.length} 条</small>
-          </div>
-          <div className="scene-beat-list">
-            {sceneBeats.length === 0 ? <p className="empty">当前章节还没有 Beat</p> : null}
-            {sceneBeats.map((beat) => (
-              <article
-                key={beat.id}
-                className={`scene-beat-item ${beat.id === activeSceneBeatId ? "active" : ""}`}
-                role="button"
-                tabIndex={0}
-                aria-pressed={beat.id === activeSceneBeatId}
-                onClick={() => onSelectSceneBeat(beat.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    onSelectSceneBeat(beat.id);
-                  }
-                }}
-              >
-                <strong>
-                  Beat {beat.beat_index} · {beat.status === "done" ? "已完成" : "进行中"}
-                </strong>
-                <p>{beat.content || "（空）"}</p>
-                <div className="action-ops">
-                  <button
-                    className="btn ghost tiny"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void onToggleSceneBeatStatus(beat.id, beat.status !== "done");
-                    }}
-                    disabled={busy}
-                  >
-                    {beat.status === "done" ? "标记进行中" : "标记已完成"}
-                  </button>
-                  <button
-                    className="btn ghost tiny"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void onDeleteSceneBeat(beat.id);
-                    }}
-                    disabled={busy}
-                  >
-                    删除
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-          <textarea
-            rows={3}
-            value={newBeatContent}
-            onChange={(event) => setNewBeatContent(event.target.value)}
-            placeholder="新增 Beat：例如「男主发现破绽并留下悬念」"
-            disabled={busy || !activeChapterId}
-          />
-          <div className="planning-row">
-            <button className="btn ghost tiny" onClick={() => void onCreateSceneBeat()} disabled={busy || !activeChapterId}>
-              添加 Beat
-            </button>
-            <button className="btn ghost tiny" onClick={() => onSelectSceneBeat(null)} disabled={busy}>
-              不使用 Beat 约束
-            </button>
-          </div>
-        </article>
-
-        <article className="planning-card">
-          <div className="panel-title sub">
-            <h3>伏笔追踪</h3>
-            <small>{foreshadowCards.length} 条</small>
-          </div>
-          {overdueForeshadowCards.length > 0 ? (
-            <p className="draft-hint warning">提醒：有 {overdueForeshadowCards.length} 条伏笔已超 50 章未收束。</p>
-          ) : null}
-          <div className="foreshadow-list">
-            {foreshadowCards.length === 0 ? <p className="empty">暂无伏笔卡</p> : null}
-            {foreshadowCards.map((item) => (
-              <article key={item.id} className="foreshadow-item">
-                <strong>
-                  {item.title} · {item.status === "resolved" ? "已收束" : "未收束"}
-                </strong>
-                <p>{item.description || "（无描述）"}</p>
-                <div className="action-ops">
-                  <button
-                    className="btn ghost tiny"
-                    onClick={() =>
-                      void onToggleForeshadowStatus(item, item.status === "resolved" ? "open" : "resolved")
-                    }
-                    disabled={busy}
-                  >
-                    {item.status === "resolved" ? "改为未收束" : "标记已收束"}
-                  </button>
-                  <button className="btn ghost tiny" onClick={() => void onDeleteForeshadowCard(item.id)} disabled={busy}>
-                    删除
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-          <input
-            type="text"
-            value={foreshadowDraftTitle}
-            onChange={(event) => setForeshadowDraftTitle(event.target.value)}
-            placeholder="伏笔标题：如「半块玉佩」"
-            disabled={busy}
-          />
-          <textarea
-            rows={3}
-            value={foreshadowDraftDescription}
-            onChange={(event) => setForeshadowDraftDescription(event.target.value)}
-            placeholder="伏笔描述：埋入信息、预期收束方向。"
-            disabled={busy}
-          />
-          <div className="planning-row">
-            <button className="btn ghost tiny" onClick={() => void onCreateForeshadowCard()} disabled={busy}>
-              新建伏笔卡
-            </button>
-          </div>
-        </article>
-      </div>
-    </section>
-  );
-});
 
 type TopBarProps = {
   uiMode: "writing" | "pro";
@@ -1647,387 +1507,6 @@ const TopBar = memo(function TopBar({
         </button>
       </div>
     </header>
-  );
-});
-
-type WorkbenchPanelVisibility = {
-  prompt: boolean;
-  planning: boolean;
-  snapshot: boolean;
-};
-
-type WorkbenchPanelKey = keyof WorkbenchPanelVisibility;
-
-const WORKBENCH_PANEL_LABELS: Record<WorkbenchPanelKey, string> = {
-  prompt: "Prompt + 知识库",
-  planning: "结构化大纲",
-  snapshot: "检索快照",
-};
-
-type WorkbenchPanelBarProps = {
-  visibility: WorkbenchPanelVisibility;
-  onToggle: (panelKey: WorkbenchPanelKey) => void;
-};
-
-const WorkbenchPanelBar = memo(function WorkbenchPanelBar({
-  visibility,
-  onToggle,
-}: WorkbenchPanelBarProps) {
-  const allHidden = !visibility.prompt && !visibility.planning && !visibility.snapshot;
-  return (
-    <section className="panel workbench-panel-bar">
-      <div className="panel-title sub">
-        <h3>工作台面板</h3>
-        <small>默认仅展示核心面板，可按需展开</small>
-      </div>
-      <div className="workbench-panel-toggles">
-        {(Object.keys(WORKBENCH_PANEL_LABELS) as WorkbenchPanelKey[]).map((panelKey) => (
-          <label key={panelKey} className="workbench-panel-toggle">
-            <input
-              type="checkbox"
-              checked={visibility[panelKey]}
-              onChange={() => onToggle(panelKey)}
-            />
-            <span>{WORKBENCH_PANEL_LABELS[panelKey]}</span>
-          </label>
-        ))}
-      </div>
-      {allHidden ? <p className="workbench-panel-hint">当前未显示任何工作台面板，建议至少开启一个。</p> : null}
-    </section>
-  );
-});
-
-type DraftWorkspacePanelProps = {
-  draftWordCount: number;
-  draftVersion: number;
-  draftUpdatedAt: string | null;
-  activeChapterId: number | null;
-  chapters: ProjectChapter[];
-  onSwitchChapter: (chapterId: number) => Promise<void>;
-  draftLoading: boolean;
-  draftSaving: boolean;
-  draftTitle: string;
-  setDraftTitle: (value: string) => void;
-  onCreateChapterAndSwitch: () => Promise<void>;
-  onMoveActiveChapter: (direction: "up" | "down") => Promise<void>;
-  canMoveChapterUp: boolean;
-  canMoveChapterDown: boolean;
-  onDeleteActiveChapter: () => Promise<void>;
-  awarenessTags: string[];
-  draftFocusMode: boolean;
-  autoSaveState: DraftAutoSaveState;
-  autoSaveAt: string | null;
-  typewriterModeEnabled: boolean;
-  localRecoveryNotice: string | null;
-  onToggleTypewriterMode: () => void;
-  onToggleDraftFocusMode: () => void;
-  onToggleZenMode: () => void;
-  zenMode: boolean;
-  uiMode: "writing" | "pro";
-  draftEditorRef: { current: HTMLDivElement | null };
-  editor: Editor | null;
-  ghostLoading: boolean;
-  ghostText: string;
-  ghostError: string | null;
-  ghostAutoEnabled: boolean;
-  onRequestGhostSuggestion: (forceRefresh?: boolean) => Promise<void>;
-  onAcceptGhostText: () => void;
-  onRejectGhostText: () => void;
-  onRegenerateGhostText: () => Promise<void>;
-  onToggleGhostAuto: () => void;
-  onSaveDraftSnapshot: () => Promise<void>;
-  onRefreshDraftSnapshot: (nextProjectId: number, preferredChapterId?: number | null) => Promise<void>;
-  projectId: number;
-  onFillPromptFromSelection: (mode: "polish" | "expand") => void;
-  onApplyAssistantToDraft: (mode: "insert" | "replace") => void;
-  selectedDraftText: string;
-  latestAssistantReply: string;
-  chapterOutlines: ChapterOutlineEntry[];
-  dragChapterId: number | null;
-  onOutlineDragStart: (chapterId: number) => void;
-  onOutlineDragEnd: () => void;
-  onReorderByDrag: (targetChapterId: number) => Promise<void>;
-  draftRevisions: ProjectChapterRevision[];
-  onRollbackDraftToVersion: (targetVersion: number) => Promise<void>;
-};
-
-const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
-  draftWordCount,
-  draftVersion,
-  draftUpdatedAt,
-  activeChapterId,
-  chapters,
-  onSwitchChapter,
-  draftLoading,
-  draftSaving,
-  draftTitle,
-  setDraftTitle,
-  onCreateChapterAndSwitch,
-  onMoveActiveChapter,
-  canMoveChapterUp,
-  canMoveChapterDown,
-  onDeleteActiveChapter,
-  awarenessTags,
-  draftFocusMode,
-  autoSaveState,
-  autoSaveAt,
-  typewriterModeEnabled,
-  localRecoveryNotice,
-  onToggleTypewriterMode,
-  onToggleDraftFocusMode,
-  onToggleZenMode,
-  zenMode,
-  uiMode,
-  draftEditorRef,
-  editor,
-  ghostLoading,
-  ghostText,
-  ghostError,
-  ghostAutoEnabled,
-  onRequestGhostSuggestion,
-  onAcceptGhostText,
-  onRejectGhostText,
-  onRegenerateGhostText,
-  onToggleGhostAuto,
-  onSaveDraftSnapshot,
-  onRefreshDraftSnapshot,
-  projectId,
-  onFillPromptFromSelection,
-  onApplyAssistantToDraft,
-  selectedDraftText,
-  latestAssistantReply,
-  chapterOutlines,
-  dragChapterId,
-  onOutlineDragStart,
-  onOutlineDragEnd,
-  onReorderByDrag,
-  draftRevisions,
-  onRollbackDraftToVersion,
-}: DraftWorkspacePanelProps) {
-  const ghostPreviewKey = useMemo(() => {
-    const trimmed = ghostText.trim();
-    if (!trimmed) return "ghost-placeholder";
-    return `ghost-${trimmed.length}-${trimmed.slice(0, 24)}-${trimmed.slice(-24)}`;
-  }, [ghostText]);
-
-  return (
-    <section className="panel draft-panel">
-      <div className="panel-title">
-        <h2>正文工作区</h2>
-        <small>
-          {draftWordCount} 字 · v{draftVersion} · {formatDateTime(draftUpdatedAt)}
-        </small>
-      </div>
-      <div className="draft-chapter-row">
-        <label className="inline-field">
-          章节
-          <select
-            value={activeChapterId ?? ""}
-            onChange={(event) => void onSwitchChapter(Number(event.target.value || 0))}
-            disabled={draftLoading || draftSaving}
-          >
-            {chapters.map((chapter) => (
-              <option key={chapter.id} value={chapter.id}>
-                {chapter.chapter_index}. {chapter.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="inline-field">
-          章节标题
-          <input
-            type="text"
-            value={draftTitle}
-            onChange={(event) => setDraftTitle(event.target.value)}
-            disabled={draftLoading || draftSaving || !activeChapterId}
-          />
-        </label>
-        <button className="btn ghost tiny" onClick={() => void onCreateChapterAndSwitch()} disabled={draftLoading || draftSaving}>
-          新建章节
-        </button>
-        <button
-          className="btn ghost tiny"
-          onClick={() => void onMoveActiveChapter("up")}
-          disabled={draftLoading || draftSaving || !canMoveChapterUp}
-        >
-          上移
-        </button>
-        <button
-          className="btn ghost tiny"
-          onClick={() => void onMoveActiveChapter("down")}
-          disabled={draftLoading || draftSaving || !canMoveChapterDown}
-        >
-          下移
-        </button>
-        <button
-          className="btn ghost tiny"
-          onClick={() => void onDeleteActiveChapter()}
-          disabled={draftLoading || draftSaving || !activeChapterId}
-        >
-          删除章节
-        </button>
-      </div>
-      <div className="awareness-strip" aria-live="polite">
-        <small>AI 当前认知</small>
-        <div className="awareness-tags">
-          {awarenessTags.length === 0 ? (
-            <span className="awareness-empty">等待会话建立上下文</span>
-          ) : (
-            awarenessTags.map((tag) => (
-              <span key={tag} className="awareness-tag">
-                #{tag}
-              </span>
-            ))
-          )}
-        </div>
-      </div>
-      <div className={`draft-editor-shell ${draftFocusMode ? "focus-mode" : ""}`}>
-        <div className="draft-editor-toolbar">
-          <div className="draft-editor-status">
-            <small>
-              编辑模式：{draftFocusMode ? "专注" : "标准"} · 零感保存：
-              {autoSaveState === "pending" ? "等待中" : null}
-              {autoSaveState === "saving" ? "保存中" : null}
-              {autoSaveState === "saved" ? `已保存(${formatDateTime(autoSaveAt)})` : null}
-              {autoSaveState === "error" ? "失败" : null}
-              {autoSaveState === "idle" ? "空闲" : null}
-            </small>
-            <small>打字机滚动：{typewriterModeEnabled ? "开启" : "关闭"}</small>
-            {localRecoveryNotice ? <small className="recovery-note">{localRecoveryNotice}</small> : null}
-          </div>
-          <div className="draft-toolbar-actions">
-            <button
-              type="button"
-              className="btn ghost tiny"
-              onClick={onToggleTypewriterMode}
-              disabled={draftLoading || !activeChapterId}
-            >
-              {typewriterModeEnabled ? "关闭打字机滚动" : "开启打字机滚动"}
-            </button>
-            <button
-              type="button"
-              className="btn ghost tiny"
-              onClick={onToggleDraftFocusMode}
-              disabled={draftLoading || !activeChapterId}
-            >
-              {draftFocusMode ? "退出专注" : "进入专注"}
-            </button>
-            <button
-              type="button"
-              className="btn ghost tiny"
-              onClick={onToggleZenMode}
-              disabled={draftLoading || !activeChapterId || uiMode !== "writing"}
-              aria-pressed={zenMode}
-            >
-              {zenMode ? "退出沉浸" : "进入沉浸"}
-            </button>
-          </div>
-        </div>
-        <EditorContent
-          ref={draftEditorRef}
-          editor={editor}
-          className={`draft-editor ${draftLoading || !activeChapterId ? "disabled" : ""}`}
-        />
-      </div>
-      <div className="ghost-panel">
-        <div className="ghost-head">
-          <strong>Ghost Text</strong>
-          <small>
-            {ghostLoading ? "生成中..." : ghostText ? "已就绪" : "等待输入"}
-            {ghostError ? ` · ${ghostError}` : ""}
-          </small>
-        </div>
-        <pre key={ghostPreviewKey} className={`ghost-preview ${ghostText.trim() ? "ready" : ""}`}>
-          {ghostText ||
-            (ghostAutoEnabled
-              ? "继续输入正文，系统会自动给出下一句建议。"
-              : "当前为手动触发，点击“生成建议”获取 Ghost Text。")}
-        </pre>
-        <div className="action-ops">
-          <button
-            className="btn ghost tiny"
-            onClick={() => void onRequestGhostSuggestion(false)}
-            disabled={ghostLoading || draftLoading || draftSaving || !activeChapterId}
-          >
-            生成建议
-          </button>
-          <button
-            className="btn primary tiny"
-            onClick={onAcceptGhostText}
-            disabled={!ghostText.trim() || ghostLoading || draftLoading || draftSaving}
-          >
-            接受
-          </button>
-          <button
-            className="btn ghost tiny"
-            onClick={onRejectGhostText}
-            disabled={!ghostText.trim() || ghostLoading}
-          >
-            拒绝
-          </button>
-          <button
-            className="btn ghost tiny"
-            onClick={() => void onRegenerateGhostText()}
-            disabled={ghostLoading || !activeChapterId}
-          >
-            重生
-          </button>
-          <button className="btn ghost tiny" onClick={onToggleGhostAuto} disabled={ghostLoading}>
-            {ghostAutoEnabled ? "改为手动" : "改为自动"}
-          </button>
-        </div>
-        <p className="ghost-shortcuts">快捷键：Tab 接受 · Esc 拒绝 · Alt + ] 重生</p>
-      </div>
-      <div className="draft-actions">
-        <button className="btn primary tiny" onClick={() => void onSaveDraftSnapshot()} disabled={draftSaving || draftLoading}>
-          {draftSaving ? "保存中..." : "保存正文"}
-        </button>
-        <button
-          className="btn ghost tiny"
-          onClick={() => void onRefreshDraftSnapshot(projectId, activeChapterId)}
-          disabled={draftSaving || draftLoading}
-        >
-          拉取服务器版本
-        </button>
-        <button className="btn ghost tiny" onClick={() => onFillPromptFromSelection("polish")}>
-          润色选中
-        </button>
-        <button className="btn ghost tiny" onClick={() => onFillPromptFromSelection("expand")}>
-          扩写选中
-        </button>
-        <button className="btn primary tiny" onClick={() => onApplyAssistantToDraft("insert")}>
-          插入助手回复
-        </button>
-        <button className="btn ghost tiny" onClick={() => onApplyAssistantToDraft("replace")}>
-          替换选中为助手回复
-        </button>
-      </div>
-      <p className="draft-hint">
-        {draftLoading ? "正在加载服务器正文..." : `已选 ${selectedDraftText.length} 字`}
-        {latestAssistantReply ? " · 最近一条助手回复可写回正文" : " · 暂无助手回复可写回"}
-      </p>
-      <div className="chapter-outline">
-        <div className="panel-title sub">
-          <h3>章节大纲</h3>
-          <small>拖拽排序 + 点击切章</small>
-        </div>
-        <ChapterOutlineList
-          chapterOutlines={chapterOutlines}
-          activeChapterId={activeChapterId}
-          dragChapterId={dragChapterId}
-          disabled={draftLoading || draftSaving}
-          onDragStart={onOutlineDragStart}
-          onDragEnd={onOutlineDragEnd}
-          onReorder={onReorderByDrag}
-          onSelect={onSwitchChapter}
-        />
-      </div>
-      <DraftRevisionList
-        draftRevisions={draftRevisions}
-        disabled={draftSaving || draftLoading}
-        onRollbackDraftToVersion={onRollbackDraftToVersion}
-      />
-    </section>
   );
 });
 
@@ -2536,6 +2015,9 @@ type AssistantActionsPanelProps = {
   sortedActions: ChatAction[];
   pendingActionIds: number[];
   mutatingActionId: number | null;
+  streamLatencySamples: StreamLatencySample[];
+  tokenUsageSamples: TokenUsageSample[];
+  retrievalHitSamples: RetrievalHitSample[];
   consistencyAudits: ConsistencyAuditReport[];
   consistencyAuditRunning: boolean;
   traceEvents: ChatStreamTraceEvent[];
@@ -2555,6 +2037,9 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
   sortedActions,
   pendingActionIds,
   mutatingActionId,
+  streamLatencySamples,
+  tokenUsageSamples,
+  retrievalHitSamples,
   consistencyAudits,
   consistencyAuditRunning,
   traceEvents,
@@ -2908,6 +2393,9 @@ type AssistantDrawerProps = {
   sortedActions: ChatAction[];
   pendingActionIds: number[];
   mutatingActionId: number | null;
+  streamLatencySamples: StreamLatencySample[];
+  tokenUsageSamples: TokenUsageSample[];
+  retrievalHitSamples: RetrievalHitSample[];
   consistencyAudits: ConsistencyAuditReport[];
   consistencyAuditRunning: boolean;
   traceEvents: ChatStreamTraceEvent[];
@@ -2945,6 +2433,9 @@ const AssistantDrawer = memo(function AssistantDrawer({
   sortedActions,
   pendingActionIds,
   mutatingActionId,
+  streamLatencySamples,
+  tokenUsageSamples,
+  retrievalHitSamples,
   consistencyAudits,
   consistencyAuditRunning,
   traceEvents,
@@ -3103,6 +2594,9 @@ const AssistantDrawer = memo(function AssistantDrawer({
                 sortedActions={sortedActions}
                 pendingActionIds={pendingActionIds}
                 mutatingActionId={mutatingActionId}
+                streamLatencySamples={streamLatencySamples}
+                tokenUsageSamples={tokenUsageSamples}
+                retrievalHitSamples={retrievalHitSamples}
                 consistencyAudits={consistencyAudits}
                 consistencyAuditRunning={consistencyAuditRunning}
                 traceEvents={traceEvents}
@@ -3319,6 +2813,10 @@ export default function App() {
   const [assistantDrawerOpen, setAssistantDrawerOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [lastStreamMetrics, setLastStreamMetrics] = useState<ChatStreamTimingMetrics | null>(null);
+  const [streamLatencySamples, setStreamLatencySamples] = useState<StreamLatencySample[]>([]);
+  const [tokenUsageSamples, setTokenUsageSamples] = useState<TokenUsageSample[]>([]);
+  const [retrievalHitSamples, setRetrievalHitSamples] = useState<RetrievalHitSample[]>([]);
+  const [hasOpenedAssistantOnce, setHasOpenedAssistantOnce] = useState(false);
   const [autoSaveState, setAutoSaveState] = useState<DraftAutoSaveState>("idle");
   const [autoSaveAt, setAutoSaveAt] = useState<string | null>(null);
   const [localRecoveryNotice, setLocalRecoveryNotice] = useState<string | null>(null);
@@ -3486,8 +2984,8 @@ export default function App() {
   const canMoveChapterUp = activeChapterPos > 0;
   const canMoveChapterDown = activeChapterPos >= 0 && activeChapterPos < chapters.length - 1;
   const chapterOutlines = useMemo<ChapterOutlineEntry[]>(
-    () =>
-      chapters.map((chapter) => {
+    () => {
+      const baseEntries = chapters.map((chapter) => {
         const cleaned = (chapter.content || "").replace(/\s+/g, "");
         const wordCount = cleaned.length;
         const previewLine = (chapter.content || "")
@@ -3501,9 +2999,41 @@ export default function App() {
           title: chapter.title,
           wordCount,
           preview,
+          updatedAt: chapter.updated_at,
+          progressPercent: 0,
         };
-      }),
+      });
+      const maxWords = Math.max(1, ...baseEntries.map((item) => item.wordCount));
+      return baseEntries.map((item) => ({
+        ...item,
+        progressPercent: item.wordCount <= 0 ? 0 : Math.max(4, Math.round((item.wordCount / maxWords) * 100)),
+      }));
+    },
     [chapters]
+  );
+  const totalChapterWords = useMemo(
+    () => chapterOutlines.reduce((sum, item) => sum + item.wordCount, 0),
+    [chapterOutlines]
+  );
+  const todayAddedWords = useMemo(() => {
+    const today = new Date();
+    return chapterOutlines.reduce((sum, item) => {
+      if (!isSameLocalDate(item.updatedAt, today)) return sum;
+      return sum + item.wordCount;
+    }, 0);
+  }, [chapterOutlines]);
+  const hasAppliedAction = useMemo(
+    () => actions.some((item) => String(item.status || "").trim().toLowerCase() === "applied"),
+    [actions]
+  );
+  const onboardingChecklist = useMemo(
+    () => ({
+      hasRoleCard: cards.length > 0,
+      hasDraftParagraph: totalChapterWords >= 30,
+      hasOpenedAssistant: hasOpenedAssistantOnce,
+      hasAppliedSuggestion: hasAppliedAction,
+    }),
+    [cards.length, totalChapterWords, hasOpenedAssistantOnce, hasAppliedAction]
   );
 
   useEffect(() => {
@@ -3534,6 +3064,58 @@ export default function App() {
     }
     return "";
   }, [messages]);
+  const ghostChapterGoal = useMemo(() => {
+    const selectedBeat =
+      sceneBeats.find((item) => item.id === activeSceneBeatId) ??
+      sceneBeats.find((item) => item.status !== "done") ??
+      sceneBeats[0] ??
+      null;
+    const beatGoal = String(selectedBeat?.content || "").trim();
+    const chapterTitle = String(activeChapter?.title || "").trim();
+    if (!beatGoal && !chapterTitle) return "";
+    if (!beatGoal) return chapterTitle.slice(0, 160);
+    if (!chapterTitle) return beatGoal.slice(0, 220);
+    return `${chapterTitle}：${beatGoal}`.slice(0, 220);
+  }, [sceneBeats, activeSceneBeatId, activeChapter?.title]);
+  const ghostActiveRoles = useMemo(() => {
+    const roleHints = ["role", "character", "人物", "角色", "主角", "配角", "反派"];
+    const picked: string[] = [];
+    const seen = new Set<string>();
+    const pushRole = (value: unknown) => {
+      const text = String(value || "").trim();
+      if (!text) return;
+      const normalized = text.toLowerCase();
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      picked.push(text.slice(0, 24));
+    };
+
+    if (povMode === "character" && povAnchor.trim()) {
+      pushRole(povAnchor.trim());
+    }
+
+    cards.forEach((card) => {
+      const title = String(card.title || "").trim();
+      if (!title) return;
+      const contentObj = card.content && typeof card.content === "object" ? (card.content as Record<string, unknown>) : {};
+      const typeValue = String(contentObj.type ?? contentObj.card_type ?? "").toLowerCase();
+      const tags = Array.isArray(contentObj.tags)
+        ? contentObj.tags.map((item) => String(item || "").toLowerCase())
+        : [];
+      const titleValue = title.toLowerCase();
+      const isRoleCard = roleHints.some(
+        (hint) => titleValue.includes(hint) || typeValue.includes(hint) || tags.some((tag) => tag.includes(hint))
+      );
+      if (isRoleCard) {
+        pushRole(title);
+      }
+    });
+
+    if (picked.length === 0) {
+      cards.slice(0, 4).forEach((card) => pushRole(card.title));
+    }
+    return picked.slice(0, 8);
+  }, [cards, povMode, povAnchor]);
 
   const draftWordCount = useMemo(() => {
     return draftText.replace(/\s+/g, "").length;
@@ -3612,6 +3194,62 @@ export default function App() {
     () => collectAwarenessTags(evidence, { includeDebugSignals: uiMode === "pro" }),
     [evidence, uiMode]
   );
+
+  useEffect(() => {
+    if (assistantDrawerOpen) {
+      setHasOpenedAssistantOnce(true);
+    }
+  }, [assistantDrawerOpen]);
+
+  useEffect(() => {
+    if (!lastStreamMetrics) return;
+    const completeMs = toFiniteNumber(lastStreamMetrics.completeMs);
+    if (completeMs === null) return;
+    setStreamLatencySamples((prev) => {
+      const next = [...prev, { at: new Date().toISOString(), completeMs }];
+      if (next.length <= PERFORMANCE_SAMPLE_LIMIT) return next;
+      return next.slice(next.length - PERFORMANCE_SAMPLE_LIMIT);
+    });
+  }, [lastStreamMetrics]);
+
+  useEffect(() => {
+    if (!usage || typeof usage !== "object") return;
+    const usageRecord = usage as Record<string, unknown>;
+    const promptTokens = toFiniteNumber(usageRecord.prompt_tokens ?? usageRecord.input_tokens ?? usageRecord.promptTokens);
+    const completionTokens = toFiniteNumber(
+      usageRecord.completion_tokens ?? usageRecord.output_tokens ?? usageRecord.completionTokens
+    );
+    const directTotal = toFiniteNumber(usageRecord.total_tokens ?? usageRecord.totalTokens ?? usageRecord.total);
+    const total =
+      directTotal ??
+      ((promptTokens ?? 0) + (completionTokens ?? 0) > 0 ? (promptTokens ?? 0) + (completionTokens ?? 0) : null);
+    if (total === null || total <= 0) return;
+    setTokenUsageSamples((prev) => {
+      const next = [...prev, { at: new Date().toISOString(), total }];
+      if (next.length <= PERFORMANCE_SAMPLE_LIMIT) return next;
+      return next.slice(next.length - PERFORMANCE_SAMPLE_LIMIT);
+    });
+  }, [usage]);
+
+  useEffect(() => {
+    if (!evidence) return;
+    const dsl = Math.max(0, Number(evidence.summary?.dsl ?? 0) || 0);
+    const graph = Math.max(0, Number(evidence.summary?.graph ?? 0) || 0);
+    const rag = Math.max(0, Number(evidence.summary?.rag ?? 0) || 0);
+    setRetrievalHitSamples((prev) => {
+      const next = [...prev, { at: new Date().toISOString(), dsl, graph, rag }];
+      if (next.length <= PERFORMANCE_SAMPLE_LIMIT) return next;
+      return next.slice(next.length - PERFORMANCE_SAMPLE_LIMIT);
+    });
+  }, [evidence]);
+
+  useEffect(() => {
+    setHasOpenedAssistantOnce(false);
+    setStreamLatencySamples([]);
+    setTokenUsageSamples([]);
+    setRetrievalHitSamples([]);
+  }, [projectId]);
+
   const ghostTextShortcutExtension = useMemo(
     () =>
       Extension.create({
@@ -4054,6 +3692,7 @@ export default function App() {
   const buildGhostCacheKey = () => {
     const tail = draftText.slice(Math.max(0, draftText.length - 320));
     const promptPart = activePromptTemplateId ?? 0;
+    const rolesPart = ghostActiveRoles.join(",");
     return [
       projectId,
       activeChapterId ?? 0,
@@ -4063,6 +3702,8 @@ export default function App() {
       model.trim() || "default",
       ghostTemperatureProfile,
       temperatureOverride ?? "auto",
+      ghostChapterGoal || "no-goal",
+      rolesPart || "no-roles",
       tail,
     ].join("|");
   };
@@ -4094,6 +3735,8 @@ export default function App() {
         scene_beat_id: activeSceneBeatId,
         prompt_template_id: activePromptTemplateId,
         prefix_text: prefixText.slice(Math.max(0, prefixText.length - 1600)),
+        chapter_goal: ghostChapterGoal || null,
+        active_roles: ghostActiveRoles.length > 0 ? ghostActiveRoles : null,
         model: model.trim() ? model.trim() : null,
         model_profile_id: activeModelProfileId,
         temperature_profile: ghostTemperatureProfile,
@@ -4148,6 +3791,8 @@ export default function App() {
     ghostAutoEnabled,
     ghostTemperatureProfile,
     temperatureOverride,
+    ghostChapterGoal,
+    ghostActiveRoles,
   ]);
 
   useEffect(() => {
@@ -5511,124 +5156,110 @@ export default function App() {
       />
 
       {uiMode === "pro" ? (
-        <>
-          <WorkspaceStatusBar
-            uiMode={uiMode}
-            sessionId={sessionId}
-            ghostAutoEnabled={ghostAutoEnabled}
-            referenceProjectIds={referenceProjectIds}
-            retrievalDegraded={retrievalDegraded}
-            degradedReasons={degradedReasons}
-            lastStreamMetrics={lastStreamMetrics}
-          />
-
-          <WorkbenchPanelBar
-            visibility={workbenchPanelVisibility}
-            onToggle={(panelKey) =>
+        <Suspense
+          fallback={<LazyPanelFallback className="panel" title="工作台模式" detail="正在加载 Pro Workspace..." />}
+        >
+          <LazyProWorkspaceMode
+            statusBar={{
+              sessionId,
+              ghostAutoEnabled,
+              referenceProjectIds,
+              retrievalDegraded,
+              degradedReasons,
+              lastStreamMetrics,
+            }}
+            workbenchPanelVisibility={workbenchPanelVisibility}
+            onToggleWorkbenchPanel={(panelKey) =>
               setWorkbenchPanelVisibility((prev) => ({
                 ...prev,
                 [panelKey]: !prev[panelKey],
               }))
             }
+            promptPanelReady={debugPromptPanelReady}
+            promptPanelProps={{
+              activePromptTemplate,
+              activePromptTemplateId,
+              templateSaving,
+              promptTemplates,
+              onHandleActiveTemplateChange: handleActiveTemplateChange,
+              onStartCreateTemplateDraft: startCreateTemplateDraft,
+              onCopyTemplateDraft: copyTemplateDraft,
+              templateName,
+              setTemplateName,
+              templateSystemPrompt,
+              setTemplateSystemPrompt,
+              templateUserPromptPrefix,
+              setTemplateUserPromptPrefix,
+              settings,
+              templateKnowledgeSettingKeys,
+              setTemplateKnowledgeSettingKeys,
+              cards,
+              templateKnowledgeCardIds,
+              setTemplateKnowledgeCardIds,
+              onSaveTemplateDraft: saveTemplateDraft,
+              templateDraftId,
+              onDeleteTemplateDraft: deleteTemplateDraft,
+              onRefreshProjectSnapshot: refreshProjectSnapshot,
+              projectId,
+              selectedKnowledgeSettings,
+              selectedKnowledgeCards,
+              estimatedPromptChars,
+              missingSettingKeys,
+              missingCardIds,
+              templateRevisions,
+              templateRevisionsLoading,
+              onRollbackTemplateToVersion: rollbackTemplateToVersion,
+            }}
+            planningPanelProps={{
+              activeChapterId,
+              volumes,
+              activeVolumeId,
+              onSelectVolume: setActiveVolumeId,
+              onCreateVolume: createVolume,
+              onBindChapterToVolume: bindActiveChapterToVolume,
+              volumeOutlineDraft,
+              setVolumeOutlineDraft,
+              onSaveVolumeOutline: saveVolumeOutline,
+              sceneBeats,
+              activeSceneBeatId,
+              onSelectSceneBeat: setActiveSceneBeatId,
+              newBeatContent,
+              setNewBeatContent,
+              onCreateSceneBeat: createBeatForActiveChapter,
+              onToggleSceneBeatStatus: toggleBeatStatus,
+              onDeleteSceneBeat: deleteBeat,
+              foreshadowCards,
+              overdueForeshadowCards,
+              foreshadowDraftTitle,
+              setForeshadowDraftTitle,
+              foreshadowDraftDescription,
+              setForeshadowDraftDescription,
+              onCreateForeshadowCard: createForeshadow,
+              onToggleForeshadowStatus: toggleForeshadowStatus,
+              onDeleteForeshadowCard: deleteForeshadow,
+              busy: planningBusy,
+            }}
+            snapshotPanelReady={proSnapshotPanelReady}
+            snapshotPanelProps={{
+              evidence,
+              settings,
+              cards,
+            }}
           />
-
-          {workbenchPanelVisibility.prompt && debugPromptPanelReady ? (
-            <Suspense
-              fallback={
-                <LazyPanelFallback
-                  className="panel prompt-panel"
-                  title="Prompt + 知识库面板"
-                  detail="正在加载工作台模块..."
-                />
-              }
-            >
-              <LazyPromptWorkshopPanel
-                activePromptTemplate={activePromptTemplate}
-                activePromptTemplateId={activePromptTemplateId}
-                templateSaving={templateSaving}
-                promptTemplates={promptTemplates}
-                onHandleActiveTemplateChange={handleActiveTemplateChange}
-                onStartCreateTemplateDraft={startCreateTemplateDraft}
-                onCopyTemplateDraft={copyTemplateDraft}
-                templateName={templateName}
-                setTemplateName={setTemplateName}
-                templateSystemPrompt={templateSystemPrompt}
-                setTemplateSystemPrompt={setTemplateSystemPrompt}
-                templateUserPromptPrefix={templateUserPromptPrefix}
-                setTemplateUserPromptPrefix={setTemplateUserPromptPrefix}
-                settings={settings}
-                templateKnowledgeSettingKeys={templateKnowledgeSettingKeys}
-                setTemplateKnowledgeSettingKeys={setTemplateKnowledgeSettingKeys}
-                cards={cards}
-                templateKnowledgeCardIds={templateKnowledgeCardIds}
-                setTemplateKnowledgeCardIds={setTemplateKnowledgeCardIds}
-                onSaveTemplateDraft={saveTemplateDraft}
-                templateDraftId={templateDraftId}
-                onDeleteTemplateDraft={deleteTemplateDraft}
-                onRefreshProjectSnapshot={refreshProjectSnapshot}
-                projectId={projectId}
-                selectedKnowledgeSettings={selectedKnowledgeSettings}
-                selectedKnowledgeCards={selectedKnowledgeCards}
-                estimatedPromptChars={estimatedPromptChars}
-                missingSettingKeys={missingSettingKeys}
-                missingCardIds={missingCardIds}
-                templateRevisions={templateRevisions}
-                templateRevisionsLoading={templateRevisionsLoading}
-                onRollbackTemplateToVersion={rollbackTemplateToVersion}
-              />
-            </Suspense>
-          ) : null}
-
-          {workbenchPanelVisibility.planning ? (
-            <StoryPlanningPanel
-              activeChapterId={activeChapterId}
-              volumes={volumes}
-              activeVolumeId={activeVolumeId}
-              onSelectVolume={setActiveVolumeId}
-              onCreateVolume={createVolume}
-              onBindChapterToVolume={bindActiveChapterToVolume}
-              volumeOutlineDraft={volumeOutlineDraft}
-              setVolumeOutlineDraft={setVolumeOutlineDraft}
-              onSaveVolumeOutline={saveVolumeOutline}
-              sceneBeats={sceneBeats}
-              activeSceneBeatId={activeSceneBeatId}
-              onSelectSceneBeat={setActiveSceneBeatId}
-              newBeatContent={newBeatContent}
-              setNewBeatContent={setNewBeatContent}
-              onCreateSceneBeat={createBeatForActiveChapter}
-              onToggleSceneBeatStatus={toggleBeatStatus}
-              onDeleteSceneBeat={deleteBeat}
-              foreshadowCards={foreshadowCards}
-              overdueForeshadowCards={overdueForeshadowCards}
-              foreshadowDraftTitle={foreshadowDraftTitle}
-              setForeshadowDraftTitle={setForeshadowDraftTitle}
-              foreshadowDraftDescription={foreshadowDraftDescription}
-              setForeshadowDraftDescription={setForeshadowDraftDescription}
-              onCreateForeshadowCard={createForeshadow}
-              onToggleForeshadowStatus={toggleForeshadowStatus}
-              onDeleteForeshadowCard={deleteForeshadow}
-              busy={planningBusy}
-            />
-          ) : null}
-
-          {workbenchPanelVisibility.snapshot && proSnapshotPanelReady ? (
-            <Suspense
-              fallback={
-                <LazyPanelFallback className="panel" title="检索与知识快照" detail="正在加载快照视图..." />
-              }
-            >
-              <LazyDebugSnapshotGrid evidence={evidence} settings={settings} cards={cards} />
-            </Suspense>
-          ) : null}
-        </>
+        </Suspense>
       ) : null}
 
       {uiMode === "writing" ? (
-        <>
-          <DraftWorkspacePanel
+        <Suspense
+          fallback={<LazyPanelFallback className="panel draft-panel" title="正文工作区" detail="正在加载写作面板..." />}
+        >
+          <LazyWritingWorkspaceMode
             draftWordCount={draftWordCount}
             draftVersion={draftVersion}
             draftUpdatedAt={draftUpdatedAt}
+            totalChapterWords={totalChapterWords}
+            todayAddedWords={todayAddedWords}
+            onboardingChecklist={onboardingChecklist}
             activeChapterId={activeChapterId}
             chapters={chapters}
             onSwitchChapter={switchChapter}
@@ -5678,45 +5309,53 @@ export default function App() {
             draftRevisions={draftRevisions}
             onRollbackDraftToVersion={rollbackDraftToVersion}
           />
-        </>
+        </Suspense>
       ) : null}
 
-      <AssistantDrawer
-        projectId={projectId}
-        assistantDrawerOpen={assistantDrawerOpen}
-        onOpenAssistantDrawer={openAssistantDrawerAndFocusComposer}
-        onCloseAssistantDrawer={closeAssistantDrawer}
-        onStartNewSession={startNewSession}
-        onSwitchSession={switchSession}
-        onRenameSession={renameSession}
-        onDeleteSession={deleteSession}
-        assistantDrawerRef={assistantDrawerRef}
-        sessionId={sessionId}
-        projectSessions={projectSessions}
-        usage={usage}
-        messages={messages}
-        input={input}
-        streaming={streaming}
-        composerInputRef={composerInputRef}
-        setInput={setInput}
-        onSend={handleSend}
-        sortedActions={sortedActions}
-        pendingActionIds={pendingActionIds}
-        mutatingActionId={mutatingActionId}
-        consistencyAudits={consistencyAudits}
-        consistencyAuditRunning={consistencyAuditRunning}
-        traceEvents={traceEvents}
-        graphTimeline={graphTimeline}
-        graphTimelineLoading={graphTimelineLoading}
-        graphTimelineChapterIndex={graphTimelineChapterIndex}
-        maxChapterIndex={maxChapterIndex}
-        setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
-        selectedActionId={selectedActionId}
-        actionLogs={actionLogs}
-        onLoadLogs={loadLogs}
-        onMutateAction={mutateAction}
-        onRunConsistencyAudit={runConsistencyAudit}
-      />
+      <ErrorBoundary
+        fallbackTitle="Pro 工作区暂时不可用"
+        fallbackDescription="助手面板发生异常，已自动保护主编辑区。可刷新页面后继续。"
+      >
+        <AssistantDrawer
+          projectId={projectId}
+          assistantDrawerOpen={assistantDrawerOpen}
+          onOpenAssistantDrawer={openAssistantDrawerAndFocusComposer}
+          onCloseAssistantDrawer={closeAssistantDrawer}
+          onStartNewSession={startNewSession}
+          onSwitchSession={switchSession}
+          onRenameSession={renameSession}
+          onDeleteSession={deleteSession}
+          assistantDrawerRef={assistantDrawerRef}
+          sessionId={sessionId}
+          projectSessions={projectSessions}
+          usage={usage}
+          messages={messages}
+          input={input}
+          streaming={streaming}
+          composerInputRef={composerInputRef}
+          setInput={setInput}
+          onSend={handleSend}
+          sortedActions={sortedActions}
+          pendingActionIds={pendingActionIds}
+          mutatingActionId={mutatingActionId}
+          streamLatencySamples={streamLatencySamples}
+          tokenUsageSamples={tokenUsageSamples}
+          retrievalHitSamples={retrievalHitSamples}
+          consistencyAudits={consistencyAudits}
+          consistencyAuditRunning={consistencyAuditRunning}
+          traceEvents={traceEvents}
+          graphTimeline={graphTimeline}
+          graphTimelineLoading={graphTimelineLoading}
+          graphTimelineChapterIndex={graphTimelineChapterIndex}
+          maxChapterIndex={maxChapterIndex}
+          setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
+          selectedActionId={selectedActionId}
+          actionLogs={actionLogs}
+          onLoadLogs={loadLogs}
+          onMutateAction={mutateAction}
+          onRunConsistencyAudit={runConsistencyAudit}
+        />
+      </ErrorBoundary>
 
       {settingsDialogOpen ? (
         <SettingsDialog

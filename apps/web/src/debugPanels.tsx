@@ -26,70 +26,119 @@ export type DebugSnapshotGridProps = {
   cards: StoryCard[];
 };
 
+type FlattenedEvidenceItem = {
+  id: string;
+  source: "setting" | "graph" | "semantic";
+  title: string;
+  subtitle?: string;
+  content: string;
+};
+
+const EVIDENCE_DEFAULT_VISIBLE_COUNT = 10;
+
+function formatEvidenceSourceLabel(source: FlattenedEvidenceItem["source"]): string {
+  if (source === "setting") return "设定库";
+  if (source === "graph") return "关系网";
+  return "语义搜索";
+}
+
 export const DebugSnapshotGrid = memo(function DebugSnapshotGrid({
   evidence,
   settings,
   cards,
 }: DebugSnapshotGridProps) {
+  const [showAllEvidence, setShowAllEvidence] = useState(false);
+  const flattenedEvidence = useMemo<FlattenedEvidenceItem[]>(() => {
+    if (!evidence) return [];
+    const dsl = evidence.sources.dsl.map((item, idx) => ({
+      id: `dsl-${item.id}-${idx}`,
+      source: "setting" as const,
+      title: item.title,
+      content: item.snippet || "",
+    }));
+    const graph = evidence.sources.graph.map((item, idx) => ({
+      id: `graph-${item.id}-${idx}`,
+      source: "graph" as const,
+      title: item.title,
+      content: item.fact || item.snippet || "",
+    }));
+    const rag = evidence.sources.rag.map((item, idx) => ({
+      id: `rag-${item.id}-${idx}`,
+      source: "semantic" as const,
+      title: item.title,
+      subtitle: [
+        typeof item.score === "number" ? `相关度=${item.score}` : "",
+        item.citation
+          ? `出处: ${item.citation.source || "unknown"}${item.citation.chunk ? `#${item.citation.chunk}` : ""}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" · ") || undefined,
+      content: item.snippet || "",
+    }));
+    return [...dsl, ...graph, ...rag];
+  }, [evidence]);
+  const visibleEvidenceItems = useMemo(
+    () =>
+      showAllEvidence
+        ? flattenedEvidence
+        : flattenedEvidence.slice(0, EVIDENCE_DEFAULT_VISIBLE_COUNT),
+    [flattenedEvidence, showAllEvidence]
+  );
+  const hiddenEvidenceCount = Math.max(0, flattenedEvidence.length - visibleEvidenceItems.length);
+
+  useEffect(() => {
+    setShowAllEvidence(false);
+  }, [evidence]);
+
   return (
     <section className="snapshot-grid">
       <article className="panel">
         <div className="panel-title sub">
-          <h3>检索证据</h3>
-          <small>{evidence ? evidence.policy.resolver_order : "未收到 evidence"}</small>
+          <h3>检索依据</h3>
+          <small>{evidence ? "设定库 / 关系网 / 语义搜索" : "尚未收到检索依据"}</small>
         </div>
         <div className="snapshot-list">
-          {!evidence ? <p className="empty">发送消息后会显示 DSL / GRAPH / RAG 命中。</p> : null}
+          {!evidence ? <p className="empty">发送消息后会显示设定库 / 关系网 / 语义搜索的命中内容。</p> : null}
           {evidence ? (
             <article className="snapshot-card">
               <strong>
-                POV: {evidence.policy.mode}
+                叙事视角: {evidence.policy.mode}
                 {evidence.policy.anchor ? ` (${evidence.policy.anchor})` : ""}
               </strong>
               <pre>
 {formatJson({
-  summary: evidence.summary,
-  providers: evidence.policy.providers,
-  ragRoute: evidence.policy.rag_route,
-  ragShortCircuit: evidence.policy.rag_short_circuit,
-  contextPack: evidence.policy.context_pack,
-  chapterContext: evidence.policy.chapter_context,
-  ranking: evidence.policy.ranking_dimensions,
-  referenceProjects: evidence.policy.reference_projects,
-  runtimeOptions: evidence.policy.runtime_options,
-  qualityGate: evidence.policy.quality_gate,
-  notes: evidence.policy.notes,
+  命中统计: evidence.summary,
+  检索来源: evidence.policy.providers,
+  语义搜索路由: evidence.policy.rag_route,
+  语义搜索短路: evidence.policy.rag_short_circuit,
+  上下文缓存: evidence.policy.context_pack,
+  章节上下文: evidence.policy.chapter_context,
+  排序维度: evidence.policy.ranking_dimensions,
+  跨项目参考: evidence.policy.reference_projects,
+  运行参数: evidence.policy.runtime_options,
+  质量门控: evidence.policy.quality_gate,
+  备注: evidence.policy.notes,
 })}
               </pre>
             </article>
           ) : null}
-          {evidence?.sources.dsl?.map((item, idx) => (
-            <article key={`dsl-${item.id}-${idx}`} className="snapshot-card">
-              <strong>[DSL] {item.title}</strong>
-              <pre>{item.snippet || ""}</pre>
+          {visibleEvidenceItems.map((item) => (
+            <article key={item.id} className="snapshot-card">
+              <strong>[{formatEvidenceSourceLabel(item.source)}] {item.title}</strong>
+              {item.subtitle ? <small>{item.subtitle}</small> : null}
+              <pre>{item.content}</pre>
             </article>
           ))}
-          {evidence?.sources.graph?.map((item, idx) => (
-            <article key={`graph-${item.id}-${idx}`} className="snapshot-card">
-              <strong>[GRAPH] {item.title}</strong>
-              <pre>{item.fact || item.snippet || ""}</pre>
-            </article>
-          ))}
-          {evidence?.sources.rag?.map((item, idx) => (
-            <article key={`rag-${item.id}-${idx}`} className="snapshot-card">
-              <strong>
-                [RAG] {item.title}
-                {typeof item.score === "number" ? ` (score=${item.score})` : ""}
-              </strong>
-              {item.citation ? (
-                <small>
-                  citation: {item.citation.source || "unknown"}
-                  {item.citation.chunk ? `#${item.citation.chunk}` : ""}
-                </small>
-              ) : null}
-              <pre>{item.snippet || ""}</pre>
-            </article>
-          ))}
+          {flattenedEvidence.length > EVIDENCE_DEFAULT_VISIBLE_COUNT ? (
+            <button
+              type="button"
+              className="btn ghost tiny evidence-toggle-btn"
+              onClick={() => setShowAllEvidence((prev) => !prev)}
+            >
+              {showAllEvidence ? "收起" : `查看更多（+${hiddenEvidenceCount}）`}
+            </button>
+          ) : null}
         </div>
       </article>
 
@@ -561,7 +610,7 @@ export const GraphCandidateReviewPanel = memo(function GraphCandidateReviewPanel
             type="text"
             value={keywordInput}
             onChange={(event) => setKeywordInput(event.target.value)}
-            placeholder="fact_key / 实体 / 关系 / evidence"
+            placeholder="fact_key / 实体 / 关系 / 依据"
           />
         </label>
         <label>
@@ -667,7 +716,7 @@ export const GraphCandidateReviewPanel = memo(function GraphCandidateReviewPanel
               <th>target</th>
               <th>confidence</th>
               <th>source_ref</th>
-              <th>evidence</th>
+              <th>依据</th>
               <th>updated_at</th>
             </tr>
           </thead>

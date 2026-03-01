@@ -53,7 +53,7 @@ STRATEGY_DEFAULTS = {
         "CITATION_POLICY": "inline",
         "CITATION_MIN_COUNT": 2,
         "CONTEXT_WINDOW_PROFILE": "quality",
-        "CONTEXT_COMPRESSION_MODE": "task_aware",
+        "CONTEXT_COMPRESSION_MODE": "rerank",
     },
 }
 
@@ -69,6 +69,13 @@ IMPLEMENTATION_DEFAULTS = {
         "RETRIEVAL_RAG_TIMEOUT_SECONDS": 1.8,
         "RETRIEVAL_CACHE_TTL_SECONDS": 5,
         "RETRIEVAL_CACHE_MAX_ENTRIES": 512,
+        "RETRIEVAL_CIRCUIT_BREAKER_ENABLED": True,
+        "RETRIEVAL_GRAPH_CB_FAILURE_THRESHOLD": 3,
+        "RETRIEVAL_GRAPH_CB_WINDOW_SECONDS": 30,
+        "RETRIEVAL_GRAPH_CB_OPEN_SECONDS": 15,
+        "RETRIEVAL_RAG_CB_FAILURE_THRESHOLD": 3,
+        "RETRIEVAL_RAG_CB_WINDOW_SECONDS": 30,
+        "RETRIEVAL_RAG_CB_OPEN_SECONDS": 15,
         "CONTEXT_COMPRESSION_MIN_CHARS": 1800,
         "CONTEXT_COMPRESSION_MAX_CHARS": 1000,
         "CONTEXT_COMPRESSION_LLM_TIMEOUT_SECONDS": 1.8,
@@ -97,6 +104,13 @@ IMPLEMENTATION_DEFAULTS = {
         "RETRIEVAL_RAG_TIMEOUT_SECONDS": 2.8,
         "RETRIEVAL_CACHE_TTL_SECONDS": 10,
         "RETRIEVAL_CACHE_MAX_ENTRIES": 2048,
+        "RETRIEVAL_CIRCUIT_BREAKER_ENABLED": True,
+        "RETRIEVAL_GRAPH_CB_FAILURE_THRESHOLD": 4,
+        "RETRIEVAL_GRAPH_CB_WINDOW_SECONDS": 45,
+        "RETRIEVAL_GRAPH_CB_OPEN_SECONDS": 20,
+        "RETRIEVAL_RAG_CB_FAILURE_THRESHOLD": 4,
+        "RETRIEVAL_RAG_CB_WINDOW_SECONDS": 45,
+        "RETRIEVAL_RAG_CB_OPEN_SECONDS": 20,
         "CONTEXT_COMPRESSION_MIN_CHARS": 2800,
         "CONTEXT_COMPRESSION_MAX_CHARS": 1500,
         "CONTEXT_COMPRESSION_LLM_TIMEOUT_SECONDS": 3.2,
@@ -245,6 +259,13 @@ class Settings:
     retrieval_rag_timeout_seconds = _parse_float(os.getenv("RETRIEVAL_RAG_TIMEOUT_SECONDS"), 2.0)
     retrieval_cache_ttl_seconds = _parse_float(os.getenv("RETRIEVAL_CACHE_TTL_SECONDS"), 6.0)
     retrieval_cache_max_entries = int(os.getenv("RETRIEVAL_CACHE_MAX_ENTRIES", "1024"))
+    retrieval_circuit_breaker_enabled = _parse_bool(os.getenv("RETRIEVAL_CIRCUIT_BREAKER_ENABLED"), True)
+    retrieval_graph_cb_failure_threshold = max(int(os.getenv("RETRIEVAL_GRAPH_CB_FAILURE_THRESHOLD", "3")), 1)
+    retrieval_graph_cb_window_seconds = _parse_float(os.getenv("RETRIEVAL_GRAPH_CB_WINDOW_SECONDS"), 30.0)
+    retrieval_graph_cb_open_seconds = _parse_float(os.getenv("RETRIEVAL_GRAPH_CB_OPEN_SECONDS"), 15.0)
+    retrieval_rag_cb_failure_threshold = max(int(os.getenv("RETRIEVAL_RAG_CB_FAILURE_THRESHOLD", "3")), 1)
+    retrieval_rag_cb_window_seconds = _parse_float(os.getenv("RETRIEVAL_RAG_CB_WINDOW_SECONDS"), 30.0)
+    retrieval_rag_cb_open_seconds = _parse_float(os.getenv("RETRIEVAL_RAG_CB_OPEN_SECONDS"), 15.0)
     deterministic_short_circuit_enabled = _parse_bool(
         os.getenv("DETERMINISTIC_SHORT_CIRCUIT_ENABLED"),
         True,
@@ -274,9 +295,13 @@ class Settings:
         "CONTEXT_COMPRESSION_RERANKER_RUNTIME",
         "onnx",
     )
+    context_compression_reranker_trust_remote_code = _parse_bool(
+        os.getenv("CONTEXT_COMPRESSION_RERANKER_TRUST_REMOTE_CODE"),
+        False,
+    )
     context_compression_reranker_onnx_path = os.getenv(
         "CONTEXT_COMPRESSION_RERANKER_ONNX_PATH",
-        "./models/bge-reranker-v2-minicpm-layerwise-int8-onnx",
+        "./models/bge-reranker-v2-minicpm-layerwise-int8-onnx/model.onnx",
     )
     context_compression_reranker_onnx_provider = os.getenv(
         "CONTEXT_COMPRESSION_RERANKER_ONNX_PROVIDER",

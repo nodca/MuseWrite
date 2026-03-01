@@ -1,6 +1,8 @@
 import unittest
+from unittest import mock
 import asyncio
 import json
+from concurrent.futures import Future
 
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -9,7 +11,7 @@ import app.services.context_compiler as context_compiler_module
 import app.services.llm_provider as llm_provider_module
 import app.services.retrieval_adapters as retrieval_adapters_module
 from app.core.config import settings
-from app.models.chat import ChatAction, ChatSession
+from app.models.chat import ChatAction, ChatSession, PendingGraphMutation
 from app.models.content import ForeshadowingCard, SettingEntry, StoryCard
 from app.services.chat_service import (
     _apply_graph_pronoun_coref_preprocess,
@@ -518,6 +520,50 @@ class WritingFlowTestCase(unittest.TestCase):
             with self.assertRaises(ValueError):
                 apply_action_effects(db, action)
 
+    def test_apply_then_undo_marks_pending_graph_mutation_canceled(self) -> None:
+        original_async_enabled = settings.graph_sync_async_enabled
+        try:
+            settings.graph_sync_async_enabled = True
+            with Session(self.engine) as db, mock.patch(
+                "app.services.chat_service.enqueue_graph_sync_job",
+                return_value=True,
+            ):
+                session = ChatSession(project_id=1, user_id="tester", title="图谱取消测试")
+                db.add(session)
+                db.commit()
+                db.refresh(session)
+
+                action = create_action(
+                    db=db,
+                    session_id=int(session.id or 0),
+                    action_type="setting.upsert",
+                    payload={"key": "世界观", "value": {"地点": "灰港码头"}},
+                    operator_id="tester",
+                    idempotency_key="pending-graph-mutation-1",
+                )
+                applied = apply_action_effects(db, action)
+                graph_sync = applied.apply_result.get("graph_sync", {}) if isinstance(applied.apply_result, dict) else {}
+                mutation_id = str(graph_sync.get("mutation_id") or "")
+                self.assertTrue(bool(mutation_id))
+
+                pending_row = db.exec(
+                    select(PendingGraphMutation).where(PendingGraphMutation.mutation_id == mutation_id)
+                ).first()
+                self.assertIsNotNone(pending_row)
+                self.assertEqual(str(getattr(pending_row, "status", "")), "queued")
+
+                undone = undo_action_effects(db, applied)
+                self.assertEqual(undone.status, "undone")
+                pending_row = db.exec(
+                    select(PendingGraphMutation).where(PendingGraphMutation.mutation_id == mutation_id)
+                ).first()
+                self.assertIsNotNone(pending_row)
+                self.assertEqual(str(getattr(pending_row, "status", "")), "canceled")
+                self.assertEqual(str(getattr(pending_row, "cancel_reason", "")), "undo_requested")
+                self.assertTrue(bool(str(getattr(pending_row, "canceled_by_mutation_id", ""))))
+        finally:
+            settings.graph_sync_async_enabled = original_async_enabled
+
     def test_context_compiler_semantic_router_and_compression(self) -> None:
         original_router_enabled = settings.semantic_router_enabled
         original_router_mode = settings.semantic_router_mode
@@ -530,7 +576,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.semantic_router_enabled = True
             settings.semantic_router_mode = "heuristic"
             settings.context_compression_enabled = True
-            settings.context_compression_mode = "heuristic"
+            settings.context_compression_mode = "rerank"
             settings.context_compression_min_chars = 120
             settings.context_compression_max_chars = 420
 
@@ -606,6 +652,118 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_mode = original_compression_mode
             settings.context_compression_min_chars = original_min_chars
             settings.context_compression_max_chars = original_max_chars
+
+    def test_context_compiler_circuit_breaker_short_circuits_after_failures(self) -> None:
+        original_cb_enabled = settings.retrieval_circuit_breaker_enabled
+        original_graph_threshold = settings.retrieval_graph_cb_failure_threshold
+        original_graph_window = settings.retrieval_graph_cb_window_seconds
+        original_graph_open = settings.retrieval_graph_cb_open_seconds
+        original_rag_threshold = settings.retrieval_rag_cb_failure_threshold
+        original_rag_window = settings.retrieval_rag_cb_window_seconds
+        original_rag_open = settings.retrieval_rag_cb_open_seconds
+        original_parallel = settings.retrieval_parallel_enabled
+        original_deterministic_short = settings.deterministic_short_circuit_enabled
+        project_id = 404
+
+        def _failed_future() -> Future[list[dict]]:
+            future: Future[list[dict]] = Future()
+            future.set_exception(RuntimeError("remote_down"))
+            return future
+
+        try:
+            settings.retrieval_circuit_breaker_enabled = True
+            settings.retrieval_graph_cb_failure_threshold = 1
+            settings.retrieval_graph_cb_window_seconds = 120.0
+            settings.retrieval_graph_cb_open_seconds = 120.0
+            settings.retrieval_rag_cb_failure_threshold = 1
+            settings.retrieval_rag_cb_window_seconds = 120.0
+            settings.retrieval_rag_cb_open_seconds = 120.0
+            settings.retrieval_parallel_enabled = False
+            settings.deterministic_short_circuit_enabled = False
+
+            for key in ("graph", "rag"):
+                state = context_compiler_module._RETRIEVAL_CIRCUIT_BREAKERS[key]
+                state["failures"].clear()
+                state["open_until"] = 0.0
+                state["opened_count"] = 0
+
+            with Session(self.engine) as db:
+                session = ChatSession(project_id=project_id, user_id="tester", title="熔断测试")
+                db.add(session)
+                db.commit()
+                db.refresh(session)
+
+                with mock.patch(
+                    "app.services.context_compiler._submit_graph_future",
+                    side_effect=lambda *args, **kwargs: _failed_future(),
+                ), mock.patch(
+                    "app.services.context_compiler._submit_rag_future",
+                    side_effect=lambda *args, **kwargs: _failed_future(),
+                ):
+                    first = compile_context_bundle(
+                        db,
+                        session_id=int(session.id or 0),
+                        project_id=project_id,
+                        chapter_id=None,
+                        scene_beat_id=None,
+                        prompt_template_id=None,
+                        user_input="第一次请求，触发故障",
+                        pov_mode="global",
+                        pov_anchor=None,
+                        rag_mode_override="mix",
+                        deterministic_first=False,
+                        thinking_enabled=False,
+                        reference_project_ids=[],
+                    )
+                    second = compile_context_bundle(
+                        db,
+                        session_id=int(session.id or 0),
+                        project_id=project_id,
+                        chapter_id=None,
+                        scene_beat_id=None,
+                        prompt_template_id=None,
+                        user_input="第二次请求，应命中熔断",
+                        pov_mode="global",
+                        pov_anchor=None,
+                        rag_mode_override="mix",
+                        deterministic_first=False,
+                        thinking_enabled=False,
+                        reference_project_ids=[],
+                    )
+
+            first_providers = first.model_context.get("evidence", {}).get("providers", {})
+            second_providers = second.model_context.get("evidence", {}).get("providers", {})
+            self.assertEqual(first_providers.get("graph"), "neo4j_error_local_graph_fallback")
+            self.assertEqual(first_providers.get("rag"), "lightrag_error_local_semantic_fallback")
+            self.assertEqual(second_providers.get("graph"), "neo4j_circuit_open_local_graph_fallback")
+            self.assertEqual(second_providers.get("rag"), "lightrag_circuit_open_local_semantic_fallback")
+
+            notes = second.evidence_event.get("policy", {}).get("notes", [])
+            self.assertTrue(any("circuit breaker" in str(item).lower() for item in notes))
+            breaker_meta = (
+                second.model_context.get("evidence", {})
+                .get("retrieval_runtime", {})
+                .get("circuit_breaker", {})
+            )
+            self.assertTrue(bool(breaker_meta.get("enabled")))
+            self.assertGreaterEqual(
+                int((breaker_meta.get("graph", {}) or {}).get("opened_count", 0)),
+                1,
+            )
+            self.assertGreaterEqual(
+                int((breaker_meta.get("rag", {}) or {}).get("opened_count", 0)),
+                1,
+            )
+        finally:
+            settings.retrieval_circuit_breaker_enabled = original_cb_enabled
+            settings.retrieval_graph_cb_failure_threshold = original_graph_threshold
+            settings.retrieval_graph_cb_window_seconds = original_graph_window
+            settings.retrieval_graph_cb_open_seconds = original_graph_open
+            settings.retrieval_rag_cb_failure_threshold = original_rag_threshold
+            settings.retrieval_rag_cb_window_seconds = original_rag_window
+            settings.retrieval_rag_cb_open_seconds = original_rag_open
+            settings.retrieval_parallel_enabled = original_parallel
+            settings.deterministic_short_circuit_enabled = original_deterministic_short
 
     def test_context_compiler_rerank_mode_prefers_local_reranker(self) -> None:
         original_router_enabled = settings.semantic_router_enabled

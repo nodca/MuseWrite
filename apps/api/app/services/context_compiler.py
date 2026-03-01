@@ -4,6 +4,7 @@ import json
 import math
 import re
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -168,6 +169,11 @@ _RERANKER_RUNTIME = "transformers"
 _RERANKER_UNAVAILABLE = False
 _RETRIEVAL_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="retrieval")
 _LOGGER = logging.getLogger(__name__)
+_RETRIEVAL_CIRCUIT_BREAKER_LOCK = Lock()
+_RETRIEVAL_CIRCUIT_BREAKERS: dict[str, dict[str, Any]] = {
+    "graph": {"failures": deque(), "open_until": 0.0, "opened_count": 0},
+    "rag": {"failures": deque(), "open_until": 0.0, "opened_count": 0},
+}
 _NEGATIVE_CONSTRAINT_MARKERS = (
     "绝对不可",
     "绝不能",
@@ -205,6 +211,97 @@ _NEGATIVE_CONSTRAINT_RELATION_MARKERS = (
     "不能",
     "不得",
 )
+
+
+def _circuit_breaker_settings(kind: str) -> tuple[int, float, float]:
+    normalized = "graph" if str(kind).strip().lower() == "graph" else "rag"
+    if normalized == "graph":
+        return (
+            max(int(settings.retrieval_graph_cb_failure_threshold), 1),
+            max(float(settings.retrieval_graph_cb_window_seconds), 1.0),
+            max(float(settings.retrieval_graph_cb_open_seconds), 1.0),
+        )
+    return (
+        max(int(settings.retrieval_rag_cb_failure_threshold), 1),
+        max(float(settings.retrieval_rag_cb_window_seconds), 1.0),
+        max(float(settings.retrieval_rag_cb_open_seconds), 1.0),
+    )
+
+
+def _circuit_breaker_prune_failures(failures: deque[float], *, now: float, window_seconds: float) -> None:
+    while failures and (now - failures[0]) > window_seconds:
+        failures.popleft()
+
+
+def _circuit_breaker_should_short_circuit(kind: str) -> tuple[bool, float]:
+    if not settings.retrieval_circuit_breaker_enabled:
+        return False, 0.0
+    normalized = "graph" if str(kind).strip().lower() == "graph" else "rag"
+    _, window_seconds, _ = _circuit_breaker_settings(normalized)
+    now = time.monotonic()
+    with _RETRIEVAL_CIRCUIT_BREAKER_LOCK:
+        state = _RETRIEVAL_CIRCUIT_BREAKERS[normalized]
+        failures: deque[float] = state["failures"]
+        _circuit_breaker_prune_failures(failures, now=now, window_seconds=window_seconds)
+        open_until = float(state.get("open_until") or 0.0)
+        if open_until > now:
+            return True, max(open_until - now, 0.0)
+        return False, 0.0
+
+
+def _circuit_breaker_record_failure(kind: str) -> None:
+    if not settings.retrieval_circuit_breaker_enabled:
+        return
+    normalized = "graph" if str(kind).strip().lower() == "graph" else "rag"
+    failure_threshold, window_seconds, open_seconds = _circuit_breaker_settings(normalized)
+    now = time.monotonic()
+    with _RETRIEVAL_CIRCUIT_BREAKER_LOCK:
+        state = _RETRIEVAL_CIRCUIT_BREAKERS[normalized]
+        failures: deque[float] = state["failures"]
+        _circuit_breaker_prune_failures(failures, now=now, window_seconds=window_seconds)
+        failures.append(now)
+        if len(failures) >= failure_threshold:
+            state["open_until"] = now + open_seconds
+            state["opened_count"] = int(state.get("opened_count") or 0) + 1
+            failures.clear()
+
+
+def _circuit_breaker_record_success(kind: str) -> None:
+    if not settings.retrieval_circuit_breaker_enabled:
+        return
+    normalized = "graph" if str(kind).strip().lower() == "graph" else "rag"
+    _, window_seconds, _ = _circuit_breaker_settings(normalized)
+    now = time.monotonic()
+    with _RETRIEVAL_CIRCUIT_BREAKER_LOCK:
+        state = _RETRIEVAL_CIRCUIT_BREAKERS[normalized]
+        failures: deque[float] = state["failures"]
+        _circuit_breaker_prune_failures(failures, now=now, window_seconds=window_seconds)
+        failures.clear()
+        if float(state.get("open_until") or 0.0) <= now:
+            state["open_until"] = 0.0
+
+
+def _circuit_breaker_snapshot(kind: str) -> dict[str, Any]:
+    normalized = "graph" if str(kind).strip().lower() == "graph" else "rag"
+    failure_threshold, window_seconds, open_seconds = _circuit_breaker_settings(normalized)
+    now = time.monotonic()
+    with _RETRIEVAL_CIRCUIT_BREAKER_LOCK:
+        state = _RETRIEVAL_CIRCUIT_BREAKERS[normalized]
+        failures: deque[float] = state["failures"]
+        _circuit_breaker_prune_failures(failures, now=now, window_seconds=window_seconds)
+        open_until = float(state.get("open_until") or 0.0)
+        open_remaining = max(open_until - now, 0.0)
+        return {
+            "kind": normalized,
+            "enabled": bool(settings.retrieval_circuit_breaker_enabled),
+            "failure_threshold": failure_threshold,
+            "window_seconds": window_seconds,
+            "open_seconds": open_seconds,
+            "recent_failures": len(failures),
+            "open": bool(open_remaining > 0),
+            "open_remaining_seconds": round(open_remaining, 3),
+            "opened_count": int(state.get("opened_count") or 0),
+        }
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -995,6 +1092,7 @@ def _submit_graph_future(
         anchor=anchor,
         limit=limit,
         current_chapter=current_chapter,
+        raise_on_error=True,
     )
 
 
@@ -1010,6 +1108,7 @@ def _submit_rag_future(
         anchor=anchor,
         limit=limit,
         mode_override=rag_mode,
+        raise_on_error=True,
     )
 
 
@@ -1562,10 +1661,10 @@ def _build_semantic_hits(
 
 
 def _normalize_context_compression_mode(value: str | None) -> str:
-    mode = str(value or "task_aware").strip().lower()
-    if mode in {"off", "heuristic", "task_aware", "llm", "auto", "rerank"}:
+    mode = str(value or "rerank").strip().lower()
+    if mode in {"off", "rerank"}:
         return mode
-    return "task_aware"
+    return "rerank"
 
 
 def _hit_preview_text(hit: dict[str, Any]) -> str:
@@ -1819,74 +1918,6 @@ def _heuristic_context_compress(
     return "\n".join(chunks)
 
 
-def _call_context_compressor_llm(
-    *,
-    user_input: str,
-    intent: str,
-    corpus: str,
-    max_chars: int,
-) -> str | None:
-    model = str(settings.lightrag_llm_model or "").strip()
-    base_url = str(settings.lightrag_llm_base_url or "").strip()
-    api_key = str(settings.lightrag_llm_api_key or "").strip()
-    if not (model and base_url and api_key):
-        return None
-
-    endpoint = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是上下文压缩器。"
-                    "仅保留与当前写作任务最相关、可直接用于生成的事实。"
-                    "禁止新增事实。"
-                    "输出 JSON：{\"compressed_context\":\"...\"}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "intent": intent,
-                        "user_input": _truncate_text(user_input, 800),
-                        "evidence": _truncate_text(corpus, 9000),
-                        "max_chars": max(int(max_chars), 200),
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
-    try:
-        timeout = httpx.Timeout(float(settings.context_compression_llm_timeout_seconds))
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:
-        return None
-
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
-    parsed = _extract_json_object(content)
-    if not parsed:
-        return None
-    summary = str(
-        parsed.get("compressed_context")
-        or parsed.get("summary")
-        or parsed.get("text")
-        or ""
-    ).strip()
-    if not summary:
-        return None
-    return _truncate_text(summary, max(int(max_chars), 200))
-
-
 def _compression_line_source(line: str) -> str:
     match = re.match(r"^\[([A-Za-z]+)\]", str(line or "").strip())
     if not match:
@@ -2060,6 +2091,7 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
         return None
     model_name = str(settings.context_compression_reranker_model or "").strip()
     runtime = str(getattr(settings, "context_compression_reranker_runtime", "onnx") or "onnx").strip().lower()
+    trust_remote_code = bool(getattr(settings, "context_compression_reranker_trust_remote_code", False))
     onnx_path = str(getattr(settings, "context_compression_reranker_onnx_path", "") or "").strip()
     onnx_provider = str(getattr(settings, "context_compression_reranker_onnx_provider", "CPUExecutionProvider") or "").strip()
     requested_device = str(settings.context_compression_reranker_device or "").strip()
@@ -2086,7 +2118,10 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
 
                 model_path = onnx_path or model_name
                 provider_name = onnx_provider or "CPUExecutionProvider"
-                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                )
                 session = ort.InferenceSession(model_path, providers=[provider_name])
                 _RERANKER_TOKENIZER = tokenizer
                 _RERANKER_MODEL = {
@@ -2118,8 +2153,14 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
                 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
                 resolved_device = _resolve_reranker_device(requested_device, torch_module=torch)
-                tokenizer = AutoTokenizer.from_pretrained(model_name)
-                model = AutoModelForSequenceClassification.from_pretrained(model_name)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                )
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                )
                 model.to(resolved_device)
                 model.eval()
                 _RERANKER_TOKENIZER = tokenizer
@@ -2410,32 +2451,17 @@ def _build_context_compression(
         }
 
     summary = ""
-    source = "heuristic"
-    reranker_telemetry: dict[str, Any] | None = None
-    if mode in {"rerank", "auto"}:
-        reranker_telemetry = {}
-        rerank_summary = _call_context_compressor_reranker(
-            user_input=user_input,
-            intent=intent,
-            lines=lines,
-            max_chars=max_chars,
-            telemetry=reranker_telemetry,
-        )
-        if rerank_summary:
-            summary = rerank_summary
-            source = "rerank"
-
-    if mode in {"llm", "auto"}:
-        if not summary:
-            llm_summary = _call_context_compressor_llm(
-                user_input=user_input,
-                intent=intent,
-                corpus=corpus,
-                max_chars=max_chars,
-            )
-            if llm_summary:
-                summary = llm_summary
-                source = "llm"
+    source = "rerank"
+    reranker_telemetry: dict[str, Any] | None = {}
+    rerank_summary = _call_context_compressor_reranker(
+        user_input=user_input,
+        intent=intent,
+        lines=lines,
+        max_chars=max_chars,
+        telemetry=reranker_telemetry,
+    )
+    if rerank_summary:
+        summary = rerank_summary
 
     if not summary:
         summary = _heuristic_context_compress(
@@ -2444,16 +2470,7 @@ def _build_context_compression(
             lines=lines,
             max_chars=max_chars,
         )
-        if mode == "task_aware":
-            source = "heuristic_task_aware"
-        elif mode == "auto":
-            source = "heuristic_auto_fallback"
-        elif mode == "rerank":
-            source = "heuristic_after_rerank"
-        elif mode == "llm":
-            source = "heuristic_after_llm"
-        else:
-            source = "heuristic"
+        source = "heuristic_after_rerank"
 
     summary = summary.strip()
     if not summary:
@@ -2871,6 +2888,8 @@ def _run_reflective_followup_retrieval(
     rag_remote_hits = 0
     graph_timeouts = 0
     rag_timeouts = 0
+    graph_circuit_open_count = 0
+    rag_circuit_open_count = 0
 
     dsl_step_limit = max(min(dsl_limit, 4), 1)
     graph_step_limit = max(min(graph_limit, 4), 1)
@@ -2887,14 +2906,23 @@ def _run_reflective_followup_retrieval(
             )
         )
 
-        graph_future = _submit_graph_future(
-            project_id,
-            terms,
-            graph_anchor,
-            graph_step_limit,
-            current_chapter=current_chapter_index,
-        )
-        graph_remote, graph_timed_out, graph_failed = _await_hits_future(graph_future, graph_timeout_seconds)
+        graph_circuit_open, _ = _circuit_breaker_should_short_circuit("graph")
+        if graph_circuit_open:
+            graph_remote, graph_timed_out, graph_failed = [], False, False
+            graph_circuit_open_count += 1
+        else:
+            graph_future = _submit_graph_future(
+                project_id,
+                terms,
+                graph_anchor,
+                graph_step_limit,
+                current_chapter=current_chapter_index,
+            )
+            graph_remote, graph_timed_out, graph_failed = _await_hits_future(graph_future, graph_timeout_seconds)
+            if graph_timed_out or graph_failed:
+                _circuit_breaker_record_failure("graph")
+            else:
+                _circuit_breaker_record_success("graph")
         if graph_remote:
             graph_extra.extend(graph_remote[:graph_step_limit])
             graph_remote_hits += len(graph_remote[:graph_step_limit])
@@ -2914,8 +2942,17 @@ def _run_reflective_followup_retrieval(
 
         if rag_short_circuit_enabled:
             continue
-        rag_future = _submit_rag_future(query, rag_anchor, rag_step_limit, rag_mode)
-        rag_remote, rag_timed_out, rag_failed = _await_hits_future(rag_future, rag_timeout_seconds)
+        rag_circuit_open, _ = _circuit_breaker_should_short_circuit("rag")
+        if rag_circuit_open:
+            rag_remote, rag_timed_out, rag_failed = [], False, False
+            rag_circuit_open_count += 1
+        else:
+            rag_future = _submit_rag_future(query, rag_anchor, rag_step_limit, rag_mode)
+            rag_remote, rag_timed_out, rag_failed = _await_hits_future(rag_future, rag_timeout_seconds)
+            if rag_timed_out or rag_failed:
+                _circuit_breaker_record_failure("rag")
+            else:
+                _circuit_breaker_record_success("rag")
         if rag_remote:
             rag_extra.extend(rag_remote[:rag_step_limit])
             rag_remote_hits += len(rag_remote[:rag_step_limit])
@@ -2946,6 +2983,8 @@ def _run_reflective_followup_retrieval(
             "rag_remote_hits": rag_remote_hits,
             "graph_timeouts": graph_timeouts,
             "rag_timeouts": rag_timeouts,
+            "graph_circuit_open_count": graph_circuit_open_count,
+            "rag_circuit_open_count": rag_circuit_open_count,
         },
     )
 
@@ -3658,14 +3697,23 @@ def compile_context_bundle(
     graph_future: Future[list[dict[str, Any]]] | None = None
     graph_timed_out = False
     graph_failed = False
+    graph_circuit_open = False
+    graph_circuit_open_remaining = 0.0
     if graph_hits_remote is None:
-        graph_future = _submit_graph_future(
-            project_id,
-            terms,
-            graph_anchor,
-            graph_limit,
-            current_chapter=current_chapter_index,
-        )
+        graph_circuit_open, graph_circuit_open_remaining = _circuit_breaker_should_short_circuit("graph")
+        if graph_circuit_open:
+            graph_cache_status = "circuit_open"
+            notes.append(
+                f"Neo4j circuit breaker 已开启（剩余约 {max(int(round(graph_circuit_open_remaining)), 1)}s），已切换本地图谱回退。"
+            )
+        else:
+            graph_future = _submit_graph_future(
+                project_id,
+                terms,
+                graph_anchor,
+                graph_limit,
+                current_chapter=current_chapter_index,
+            )
 
     rag_cache_key = _rag_cache_key(user_input, rag_anchor, rag_mode, rag_limit)
     semantic_hits_remote, rag_cache_status = _cache_get(_RAG_HITS_CACHE, rag_cache_key)
@@ -3673,16 +3721,31 @@ def compile_context_bundle(
     rag_future_started_at: float | None = None
     rag_timed_out = False
     rag_failed = False
+    rag_circuit_open = False
+    rag_circuit_open_remaining = 0.0
+    rag_circuit_note_added = False
 
     if semantic_hits_remote is None and parallel_enabled and not deterministic_first:
-        rag_future_started_at = time.monotonic()
-        rag_future = _submit_rag_future(user_input, rag_anchor, rag_limit, rag_mode)
+        rag_circuit_open, rag_circuit_open_remaining = _circuit_breaker_should_short_circuit("rag")
+        if rag_circuit_open:
+            rag_cache_status = "circuit_open"
+            notes.append(
+                f"LightRAG circuit breaker 已开启（剩余约 {max(int(round(rag_circuit_open_remaining)), 1)}s），已切换本地语义回退。"
+            )
+            rag_circuit_note_added = True
+        else:
+            rag_future_started_at = time.monotonic()
+            rag_future = _submit_rag_future(user_input, rag_anchor, rag_limit, rag_mode)
 
     if graph_hits_remote is None and graph_future is not None:
         graph_hits_remote, graph_timed_out, graph_failed = _await_hits_future(
             graph_future,
             graph_timeout_seconds,
         )
+        if graph_timed_out or graph_failed:
+            _circuit_breaker_record_failure("graph")
+        else:
+            _circuit_breaker_record_success("graph")
         if graph_hits_remote:
             _cache_set(_GRAPH_HITS_CACHE, graph_cache_key, graph_hits_remote)
             graph_cache_status = "set"
@@ -3705,7 +3768,9 @@ def compile_context_bundle(
                 limit=graph_limit,
             )
         )[:graph_limit]
-        if graph_timed_out:
+        if graph_circuit_open:
+            graph_provider = "neo4j_circuit_open_local_graph_fallback"
+        elif graph_timed_out:
             graph_provider = "neo4j_timeout_local_graph_fallback"
         elif graph_failed:
             graph_provider = "neo4j_error_local_graph_fallback"
@@ -3725,20 +3790,34 @@ def compile_context_bundle(
     else:
         if semantic_hits_remote is None:
             if rag_future is None:
-                rag_future_started_at = time.monotonic()
-                rag_future = _submit_rag_future(user_input, rag_anchor, rag_limit, rag_mode)
-            elapsed = (time.monotonic() - rag_future_started_at) if rag_future_started_at is not None else 0.0
-            wait_timeout = max(rag_timeout_seconds - elapsed, 0.05)
-            semantic_hits_remote, rag_timed_out, rag_failed = _await_hits_future(rag_future, wait_timeout)
-            if semantic_hits_remote:
-                _cache_set(_RAG_HITS_CACHE, rag_cache_key, semantic_hits_remote)
-                rag_cache_status = "set"
-            elif rag_timed_out:
-                rag_cache_status = "timeout"
-            elif rag_failed:
-                rag_cache_status = "error"
-            else:
-                rag_cache_status = "empty"
+                rag_circuit_open, rag_circuit_open_remaining = _circuit_breaker_should_short_circuit("rag")
+                if rag_circuit_open:
+                    rag_cache_status = "circuit_open"
+                    if not rag_circuit_note_added:
+                        notes.append(
+                            f"LightRAG circuit breaker 已开启（剩余约 {max(int(round(rag_circuit_open_remaining)), 1)}s），已切换本地语义回退。"
+                        )
+                        rag_circuit_note_added = True
+                else:
+                    rag_future_started_at = time.monotonic()
+                    rag_future = _submit_rag_future(user_input, rag_anchor, rag_limit, rag_mode)
+            if rag_future is not None:
+                elapsed = (time.monotonic() - rag_future_started_at) if rag_future_started_at is not None else 0.0
+                wait_timeout = max(rag_timeout_seconds - elapsed, 0.05)
+                semantic_hits_remote, rag_timed_out, rag_failed = _await_hits_future(rag_future, wait_timeout)
+                if rag_timed_out or rag_failed:
+                    _circuit_breaker_record_failure("rag")
+                else:
+                    _circuit_breaker_record_success("rag")
+                if semantic_hits_remote:
+                    _cache_set(_RAG_HITS_CACHE, rag_cache_key, semantic_hits_remote)
+                    rag_cache_status = "set"
+                elif rag_timed_out:
+                    rag_cache_status = "timeout"
+                elif rag_failed:
+                    rag_cache_status = "error"
+                else:
+                    rag_cache_status = "empty"
         if semantic_hits_remote:
             semantic_hits = _apply_memory_decay(semantic_hits_remote)[:rag_limit]
             rag_provider = "lightrag_cache" if rag_cache_status == "hit" else "lightrag"
@@ -3752,7 +3831,9 @@ def compile_context_bundle(
                     limit=rag_limit,
                 )
             )[:rag_limit]
-            if rag_timed_out:
+            if rag_circuit_open:
+                rag_provider = "lightrag_circuit_open_local_semantic_fallback"
+            elif rag_timed_out:
                 rag_provider = "lightrag_timeout_local_semantic_fallback"
             elif rag_failed:
                 rag_provider = "lightrag_error_local_semantic_fallback"
@@ -3978,6 +4059,11 @@ def compile_context_bundle(
         "parallel_enabled": parallel_enabled,
         "graph_timeout_seconds": graph_timeout_seconds,
         "rag_timeout_seconds": rag_timeout_seconds,
+        "circuit_breaker": {
+            "enabled": bool(settings.retrieval_circuit_breaker_enabled),
+            "graph": _circuit_breaker_snapshot("graph"),
+            "rag": _circuit_breaker_snapshot("rag"),
+        },
         "cache_ttl_seconds": retrieval_cache_ttl,
         "graph_cache": graph_cache_status,
         "rag_cache": rag_cache_status,

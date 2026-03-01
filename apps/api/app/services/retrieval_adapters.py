@@ -343,6 +343,7 @@ def fetch_lightrag_semantic_hits(
     anchor: str | None = None,
     limit: int = 8,
     mode_override: str | None = None,
+    raise_on_error: bool = False,
 ) -> list[dict[str, Any]]:
     if not settings.lightrag_enabled:
         return []
@@ -374,6 +375,8 @@ def fetch_lightrag_semantic_hits(
             resp.raise_for_status()
             payload = resp.json()
     except Exception:
+        if raise_on_error:
+            raise
         return []
 
     # Official LightRAG /query/data format (v1.4+).
@@ -1158,6 +1161,7 @@ def fetch_neo4j_graph_facts(
     anchor: str | None = None,
     limit: int = 10,
     current_chapter: int | None = None,
+    raise_on_error: bool = False,
 ) -> list[dict[str, Any]]:
     if not settings.neo4j_enabled:
         return []
@@ -1234,6 +1238,8 @@ def fetch_neo4j_graph_facts(
             )
             records = rows.data()
     except Exception:
+        if raise_on_error:
+            raise
         return []
     finally:
         if driver is not None:

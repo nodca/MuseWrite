@@ -51,6 +51,9 @@ const SWR_CACHE_RULES: Array<{ pattern: RegExp; ttlMs: number }> = [
   { pattern: /^\/api\/chat\/projects\/\d+\/draft(?:\/revisions)?(?:\?.*)?$/i, ttlMs: 2200 },
 ];
 
+const EXPIRED_LOGIN_MESSAGE = "登录已过期，请重新登录";
+const LIGHTRAG_TIMEOUT_MESSAGE = "AI 服务响应较慢，已切换到本地模式";
+
 function authHeaders(): Record<string, string> {
   if (!API_TOKEN) return {};
   return {
@@ -75,12 +78,52 @@ function buildHeaders(
 }
 
 async function parseError(resp: Response): Promise<string> {
+  let rawMessage = "";
   const contentType = resp.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
-    const payload = (await resp.json()) as { detail?: string; error?: string };
-    return payload.detail ?? payload.error ?? `Request failed: ${resp.status}`;
+    try {
+      const payload = (await resp.json()) as { detail?: string; error?: string };
+      rawMessage = payload.detail ?? payload.error ?? "";
+    } catch {
+      rawMessage = "";
+    }
+  } else {
+    rawMessage = await resp.text();
   }
-  return (await resp.text()) || `Request failed: ${resp.status}`;
+  return toFriendlyErrorMessage(rawMessage, resp.status);
+}
+
+export function toFriendlyErrorMessage(rawMessage: string, status?: number): string {
+  const normalized = (rawMessage || "").trim();
+  const lowerMessage = normalized.toLowerCase();
+  const unauthorizedByStatus = status === 401;
+  const unauthorizedByMessage =
+    /\b401\b/.test(lowerMessage) ||
+    lowerMessage.includes("unauthorized") ||
+    lowerMessage.includes("invalid access token") ||
+    lowerMessage.includes("missing authorization header") ||
+    lowerMessage.includes("invalid authorization header");
+  if (unauthorizedByStatus || unauthorizedByMessage) {
+    return EXPIRED_LOGIN_MESSAGE;
+  }
+
+  const hasTimeoutSignal =
+    lowerMessage.includes("timeout") ||
+    lowerMessage.includes("timed out") ||
+    lowerMessage.includes("time out") ||
+    lowerMessage.includes("deadline exceeded");
+  const hasLightRagSignal =
+    lowerMessage.includes("lightrag") ||
+    lowerMessage.includes("rag_timeout") ||
+    lowerMessage.includes("rag timeout") ||
+    lowerMessage.includes("timeout_local_semantic_fallback");
+  if (hasTimeoutSignal && hasLightRagSignal) {
+    return LIGHTRAG_TIMEOUT_MESSAGE;
+  }
+
+  if (normalized) return normalized;
+  if (typeof status === "number") return `请求失败（${status}）`;
+  return "请求失败，请稍后再试";
 }
 
 function serializeHeaders(headers: Headers): string {

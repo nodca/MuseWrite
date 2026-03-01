@@ -33,6 +33,8 @@ class GhostTextRequest(BaseModel):
     scene_beat_id: Optional[int] = Field(default=None, ge=1)
     prompt_template_id: Optional[int] = Field(default=None, ge=1)
     prefix_text: str = Field(default="", max_length=8000)
+    chapter_goal: Optional[str] = Field(default=None, max_length=320)
+    active_roles: list[str] = Field(default_factory=list, max_length=16)
     model: Optional[str] = Field(default=None, max_length=128)
     style_guard: bool = True
     temperature_profile: Optional[str] = Field(default=None, max_length=32)

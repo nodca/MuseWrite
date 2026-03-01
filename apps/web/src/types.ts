@@ -35,6 +35,8 @@ export interface GhostTextRequest {
   scene_beat_id?: number | null;
   prompt_template_id?: number | null;
   prefix_text: string;
+  chapter_goal?: string | null;
+  active_roles?: string[] | null;
   model: string | null;
   style_guard?: boolean;
   temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;

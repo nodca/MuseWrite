@@ -41,6 +41,7 @@ from app.services.graph_job_queue import (
     fail_graph_sync_job,
     retry_graph_sync_job,
 )
+from app.services.graph_mutation_registry import get_pending_graph_mutation
 from app.services.index_lifecycle_queue import (
     complete_index_lifecycle_job,
     dequeue_index_lifecycle_job,
@@ -137,6 +138,30 @@ def _process_graph_job(job: dict[str, Any]) -> tuple[str, int]:
         with _project_advisory_lock(db, project_id) as locked:
             if not locked:
                 return "retry_locked", attempt
+
+            if mutation_id:
+                pending = get_pending_graph_mutation(db, mutation_id=mutation_id)
+                if pending is not None:
+                    pending_status = str(getattr(pending, "status", "") or "").strip().lower()
+                    if pending_status == "canceled":
+                        create_action_audit_log(
+                            db=db,
+                            action_id=action.id,
+                            event_type="graph_skipped",
+                            operator_id=action.operator_id,
+                            event_payload={
+                                "reason": "canceled_before_worker_execute",
+                                "mutation_id": mutation_id,
+                                "expected_version": expected_version,
+                                "canceled_by_mutation_id": str(
+                                    getattr(pending, "canceled_by_mutation_id", "") or ""
+                                ),
+                                "cancel_reason": str(getattr(pending, "cancel_reason", "") or ""),
+                                "job_idempotency_key": job_idempotency_key,
+                                "metric": "graph_skipped_stale",
+                            },
+                        )
+                        return "drop_stale", attempt
 
             if expected_version > 0 and project_id > 0:
                 project_version = _current_project_version(db, project_id)

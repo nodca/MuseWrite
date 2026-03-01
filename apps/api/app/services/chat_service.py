@@ -33,6 +33,11 @@ from app.models.content import (
     StoryCard,
 )
 from app.services.graph_job_queue import enqueue_graph_sync_job
+from app.services.graph_mutation_registry import (
+    mark_pending_graph_mutation_canceled,
+    mark_pending_graph_mutation_status,
+    upsert_pending_graph_mutation,
+)
 from app.services.index_lifecycle_queue import enqueue_index_lifecycle_job
 from app.services.entity_merge_queue import enqueue_entity_merge_scan_job
 from app.services.index_lifecycle_service import process_index_lifecycle_rebuild
@@ -1716,6 +1721,13 @@ def process_graph_sync_for_action(
     db.expire_all()
     latest_action = db.get(ChatAction, action.id)
     if not latest_action:
+        if mutation_id:
+            mark_pending_graph_mutation_status(
+                db,
+                mutation_id=mutation_id,
+                status="skipped",
+                cancel_reason="action_missing",
+            )
         return None, []
 
     current_meta = _graph_sync_meta(latest_action)
@@ -1726,6 +1738,13 @@ def process_graph_sync_for_action(
         expected_version=expected_version,
     )
     if is_stale:
+        if mutation_id or current_mutation_id:
+            mark_pending_graph_mutation_status(
+                db,
+                mutation_id=mutation_id or current_mutation_id,
+                status="skipped",
+                cancel_reason=stale_reason or "stale_before_write",
+            )
         create_action_audit_log(
             db=db,
             action_id=latest_action.id,
@@ -1742,6 +1761,12 @@ def process_graph_sync_for_action(
 
     current_status = str(current_meta.get("status") or "")
     if current_status in {"synced", "no_facts"} and (not mutation_id or mutation_id == current_mutation_id):
+        if mutation_id or current_mutation_id:
+            mark_pending_graph_mutation_status(
+                db,
+                mutation_id=mutation_id or current_mutation_id,
+                status=current_status,
+            )
         return current_meta, []
 
     graph_sync, fact_keys = _sync_graph_for_action(
@@ -1757,6 +1782,13 @@ def process_graph_sync_for_action(
     if not post_action:
         if fact_keys:
             delete_neo4j_graph_facts(project_id, fact_keys)
+            if mutation_id:
+                mark_pending_graph_mutation_status(
+                    db,
+                    mutation_id=mutation_id,
+                    status="compensated",
+                    cancel_reason="action_missing_after_write",
+                )
         return graph_sync, []
 
     post_meta = _graph_sync_meta(post_action)
@@ -1770,6 +1802,13 @@ def process_graph_sync_for_action(
     )
     if post_stale:
         deleted = delete_neo4j_graph_facts(project_id, fact_keys) if fact_keys else 0
+        if mutation_id or post_mutation_id:
+            mark_pending_graph_mutation_status(
+                db,
+                mutation_id=mutation_id or post_mutation_id,
+                status="compensated",
+                cancel_reason=post_stale_reason or "stale_or_undone_after_write",
+            )
         create_action_audit_log(
             db=db,
             action_id=post_action.id,
@@ -1800,6 +1839,13 @@ def process_graph_sync_for_action(
     write_action = db.get(ChatAction, latest_action.id)
     if not write_action:
         deleted = delete_neo4j_graph_facts(project_id, fact_keys) if fact_keys else 0
+        if mutation_id or post_mutation_id:
+            mark_pending_graph_mutation_status(
+                db,
+                mutation_id=mutation_id or post_mutation_id,
+                status="compensated",
+                cancel_reason="action_missing_before_commit",
+            )
         return (
             {
                 "status": "compensated",
@@ -1823,6 +1869,13 @@ def process_graph_sync_for_action(
     )
     if write_stale:
         deleted = delete_neo4j_graph_facts(project_id, fact_keys) if fact_keys else 0
+        if mutation_id or write_mutation_id:
+            mark_pending_graph_mutation_status(
+                db,
+                mutation_id=mutation_id or write_mutation_id,
+                status="compensated",
+                cancel_reason=write_stale_reason or "stale_before_commit",
+            )
         create_action_audit_log(
             db=db,
             action_id=write_action.id,
@@ -1877,6 +1930,12 @@ def process_graph_sync_for_action(
     db.refresh(write_action)
 
     status = str((graph_sync or {}).get("status") or "")
+    if mutation_id_final:
+        mark_pending_graph_mutation_status(
+            db,
+            mutation_id=mutation_id_final,
+            status=status or "unknown",
+        )
     event_type = "graph_synced" if status == "synced" else ("graph_skipped" if status == "no_facts" else "graph_degraded")
     create_action_audit_log(
         db=db,
@@ -2224,6 +2283,16 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
     db.add(action)
     db.flush()
 
+    if atype in {"setting.upsert", "card.create", "card.update"} and action.id:
+        upsert_pending_graph_mutation(
+            db,
+            project_id=project_id,
+            action_id=int(action.id),
+            mutation_id=mutation_id,
+            expected_version=mutation_version,
+            status="pending_queue",
+        )
+
     if atype in {"setting.upsert", "card.create", "card.update"}:
         if settings.graph_sync_async_enabled:
             queued = enqueue_graph_sync_job(
@@ -2239,6 +2308,11 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 db=db,
             )
             if queued:
+                mark_pending_graph_mutation_status(
+                    db,
+                    mutation_id=mutation_id,
+                    status="queued",
+                )
                 action.apply_result = {
                     **(action.apply_result or {}),
                     "graph_sync": {
@@ -2507,6 +2581,14 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
     lifecycle_compensation_idempotency_key = f"index-lifecycle:undo:{action.id}:{compensation_mutation_id}"
     base_apply_result = action.apply_result if isinstance(action.apply_result, dict) else {}
     graph_sync_meta = base_apply_result.get("graph_sync")
+    graph_sync_mutation_id = str(graph_sync_meta.get("mutation_id") or "") if isinstance(graph_sync_meta, dict) else ""
+    if graph_sync_mutation_id:
+        mark_pending_graph_mutation_canceled(
+            db,
+            mutation_id=graph_sync_mutation_id,
+            cancel_reason="undo_requested",
+            canceled_by_mutation_id=compensation_mutation_id,
+        )
     graph_sync_final = (
         {
             **graph_sync_meta,
