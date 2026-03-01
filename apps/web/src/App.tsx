@@ -1244,10 +1244,10 @@ type ChapterOutlineListProps = {
   activeChapterId: number | null;
   dragChapterId: number | null;
   disabled: boolean;
-  onDragStartRef: { current: (chapterId: number) => void };
-  onDragEndRef: { current: () => void };
-  onReorderRef: { current: (targetChapterId: number) => Promise<void> };
-  onSelectRef: { current: (chapterId: number) => Promise<void> };
+  onDragStart: (chapterId: number) => void;
+  onDragEnd: () => void;
+  onReorder: (targetChapterId: number) => Promise<void>;
+  onSelect: (chapterId: number) => Promise<void>;
 };
 
 const ChapterOutlineList = memo(function ChapterOutlineList({
@@ -1255,10 +1255,10 @@ const ChapterOutlineList = memo(function ChapterOutlineList({
   activeChapterId,
   dragChapterId,
   disabled,
-  onDragStartRef,
-  onDragEndRef,
-  onReorderRef,
-  onSelectRef,
+  onDragStart,
+  onDragEnd,
+  onReorder,
+  onSelect,
 }: ChapterOutlineListProps) {
   return (
     <div className="chapter-outline-list">
@@ -1271,14 +1271,14 @@ const ChapterOutlineList = memo(function ChapterOutlineList({
           className={`chapter-outline-item ${item.id === activeChapterId ? "active" : ""} ${
             item.id === dragChapterId ? "dragging" : ""
           }`}
-          onDragStart={() => onDragStartRef.current(item.id)}
-          onDragEnd={() => onDragEndRef.current()}
+          onDragStart={() => onDragStart(item.id)}
+          onDragEnd={onDragEnd}
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault();
-            void onReorderRef.current(item.id);
+            void onReorder(item.id);
           }}
-          onClick={() => void onSelectRef.current(item.id)}
+          onClick={() => void onSelect(item.id)}
           disabled={disabled}
         >
           <strong>
@@ -1703,7 +1703,7 @@ type DraftWorkspacePanelProps = {
   draftUpdatedAt: string | null;
   activeChapterId: number | null;
   chapters: ProjectChapter[];
-  switchChapterRef: { current: (chapterId: number) => Promise<void> };
+  onSwitchChapter: (chapterId: number) => Promise<void>;
   draftLoading: boolean;
   draftSaving: boolean;
   draftTitle: string;
@@ -1744,9 +1744,9 @@ type DraftWorkspacePanelProps = {
   latestAssistantReply: string;
   chapterOutlines: ChapterOutlineEntry[];
   dragChapterId: number | null;
-  handleOutlineDragStartRef: { current: (chapterId: number) => void };
-  handleOutlineDragEndRef: { current: () => void };
-  reorderByDragRef: { current: (targetChapterId: number) => Promise<void> };
+  onOutlineDragStart: (chapterId: number) => void;
+  onOutlineDragEnd: () => void;
+  onReorderByDrag: (targetChapterId: number) => Promise<void>;
   draftRevisions: ProjectChapterRevision[];
   onRollbackDraftToVersion: (targetVersion: number) => Promise<void>;
 };
@@ -1757,7 +1757,7 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   draftUpdatedAt,
   activeChapterId,
   chapters,
-  switchChapterRef,
+  onSwitchChapter,
   draftLoading,
   draftSaving,
   draftTitle,
@@ -1798,9 +1798,9 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   latestAssistantReply,
   chapterOutlines,
   dragChapterId,
-  handleOutlineDragStartRef,
-  handleOutlineDragEndRef,
-  reorderByDragRef,
+  onOutlineDragStart,
+  onOutlineDragEnd,
+  onReorderByDrag,
   draftRevisions,
   onRollbackDraftToVersion,
 }: DraftWorkspacePanelProps) {
@@ -1823,7 +1823,7 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
           章节
           <select
             value={activeChapterId ?? ""}
-            onChange={(event) => void switchChapterRef.current(Number(event.target.value || 0))}
+            onChange={(event) => void onSwitchChapter(Number(event.target.value || 0))}
             disabled={draftLoading || draftSaving}
           >
             {chapters.map((chapter) => (
@@ -2016,10 +2016,10 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
           activeChapterId={activeChapterId}
           dragChapterId={dragChapterId}
           disabled={draftLoading || draftSaving}
-          onDragStartRef={handleOutlineDragStartRef}
-          onDragEndRef={handleOutlineDragEndRef}
-          onReorderRef={reorderByDragRef}
-          onSelectRef={switchChapterRef}
+          onDragStart={onOutlineDragStart}
+          onDragEnd={onOutlineDragEnd}
+          onReorder={onReorderByDrag}
+          onSelect={onSwitchChapter}
         />
       </div>
       <DraftRevisionList
@@ -3371,10 +3371,6 @@ export default function App() {
   const acceptGhostTextRef = useRef<() => void>(() => undefined);
   const rejectGhostTextRef = useRef<() => void>(() => undefined);
   const regenerateGhostTextRef = useRef<() => Promise<void>>(async () => undefined);
-  const switchChapterRef = useRef<(chapterId: number) => Promise<void>>(async () => undefined);
-  const reorderByDragRef = useRef<(targetChapterId: number) => Promise<void>>(async () => undefined);
-  const handleOutlineDragStartRef = useRef<(chapterId: number) => void>(() => undefined);
-  const handleOutlineDragEndRef = useRef<() => void>(() => undefined);
   const refreshGraphTimelineRef = useRef<(chapterIndex: number) => Promise<void>>(async () => undefined);
   const actionLogsCacheRef = useRef<Map<number, ActionAuditLog[]>>(new Map());
   const actionLogsInFlightRef = useRef<Map<number, Promise<ActionAuditLog[]>>>(new Map());
@@ -5495,10 +5491,6 @@ export default function App() {
     }
   };
 
-  switchChapterRef.current = switchChapter;
-  reorderByDragRef.current = reorderByDrag;
-  handleOutlineDragStartRef.current = handleOutlineDragStart;
-  handleOutlineDragEndRef.current = handleOutlineDragEnd;
   refreshGraphTimelineRef.current = refreshGraphTimeline;
 
   return (
@@ -5642,7 +5634,7 @@ export default function App() {
             draftUpdatedAt={draftUpdatedAt}
             activeChapterId={activeChapterId}
             chapters={chapters}
-            switchChapterRef={switchChapterRef}
+            onSwitchChapter={switchChapter}
             draftLoading={draftLoading}
             draftSaving={draftSaving}
             draftTitle={draftTitle}
@@ -5683,9 +5675,9 @@ export default function App() {
             latestAssistantReply={latestAssistantReply}
             chapterOutlines={chapterOutlines}
             dragChapterId={dragChapterId}
-            handleOutlineDragStartRef={handleOutlineDragStartRef}
-            handleOutlineDragEndRef={handleOutlineDragEndRef}
-            reorderByDragRef={reorderByDragRef}
+            onOutlineDragStart={handleOutlineDragStart}
+            onOutlineDragEnd={handleOutlineDragEnd}
+            onReorderByDrag={reorderByDrag}
             draftRevisions={draftRevisions}
             onRollbackDraftToVersion={rollbackDraftToVersion}
           />
