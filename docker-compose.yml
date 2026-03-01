@@ -18,6 +18,8 @@ services:
     build:
       context: ./apps/api
       dockerfile: Dockerfile
+      args:
+        PRELOAD_RERANKER_ONNX: ${PRELOAD_RERANKER_ONNX:-true}
     container_name: novel_api
     environment: &api_worker_common_env
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-novel_platform}
@@ -66,8 +68,6 @@ services:
       # Optional CI / regression overrides (kept for compatibility)
       RAGAS_GATE_ENABLED: ${RAGAS_GATE_ENABLED:-false}
       RAGAS_THRESHOLD: ${RAGAS_THRESHOLD:-0.55}
-    volumes:
-      - ./apps/api/models:/app/models
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -81,12 +81,12 @@ services:
     build:
       context: ./apps/api
       dockerfile: Dockerfile
+      args:
+        PRELOAD_RERANKER_ONNX: ${PRELOAD_RERANKER_ONNX:-true}
     container_name: novel_worker
     command: ["python", "-m", "app.worker"]
     environment:
       <<: *api_worker_common_env
-    volumes:
-      - ./apps/api/models:/app/models
     depends_on:
       postgres:
         condition: service_healthy

@@ -203,6 +203,7 @@ def main() -> int:
         args.model_id,
         trust_remote_code=bool(args.trust_remote_code),
     )
+    tokenizer.save_pretrained(output_path.parent)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         trust_remote_code=bool(args.trust_remote_code),

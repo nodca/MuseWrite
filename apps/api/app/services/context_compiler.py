@@ -8,6 +8,7 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
@@ -354,6 +355,26 @@ def _extract_reranker_raw_scores(logits: Any) -> list[float] | None:
         return [float(item) for item in raw]
     except Exception:
         return None
+
+
+def _resolve_onnx_tokenizer_source(model_name: str, onnx_path: str) -> str:
+    raw_onnx_path = str(onnx_path or "").strip()
+    if not raw_onnx_path:
+        return model_name
+    try:
+        candidate = Path(raw_onnx_path)
+        model_dir = candidate.parent if candidate.suffix else candidate
+        if model_dir.exists() and model_dir.is_dir():
+            tokenizer_markers = (
+                "tokenizer_config.json",
+                "tokenizer.json",
+                "special_tokens_map.json",
+            )
+            if any((model_dir / marker).exists() for marker in tokenizer_markers):
+                return str(model_dir)
+    except Exception:
+        return model_name
+    return model_name
 
 
 def _circuit_breaker_settings(kind: str) -> tuple[int, float, float]:
@@ -2238,6 +2259,7 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
     input_format = "layerwise" if _is_layerwise_reranker_model(model_name) else "pair"
     onnx_path = str(getattr(settings, "context_compression_reranker_onnx_path", "") or "").strip()
     onnx_provider = str(getattr(settings, "context_compression_reranker_onnx_provider", "CPUExecutionProvider") or "").strip()
+    onnx_tokenizer_source = _resolve_onnx_tokenizer_source(model_name, onnx_path)
     requested_device = str(settings.context_compression_reranker_device or "").strip()
     if not model_name:
         return None
@@ -2252,6 +2274,7 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
             requested_device,
             str(int(trust_remote_code)),
             input_format,
+            onnx_tokenizer_source,
         ]
     )
     global _RERANKER_MODEL, _RERANKER_TOKENIZER, _RERANKER_MODEL_NAME, _RERANKER_DEVICE, _RERANKER_RUNTIME, _RERANKER_UNAVAILABLE
@@ -2273,7 +2296,7 @@ def _load_context_compression_reranker() -> tuple[Any, Any, str] | None:
                 model_path = onnx_path or model_name
                 provider_name = onnx_provider or "CPUExecutionProvider"
                 tokenizer = AutoTokenizer.from_pretrained(
-                    model_name,
+                    onnx_tokenizer_source,
                     trust_remote_code=trust_remote_code,
                 )
                 session = ort.InferenceSession(model_path, providers=[provider_name])

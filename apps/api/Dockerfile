@@ -1,5 +1,7 @@
 FROM python:3.12-slim AS base
 
+ARG PRELOAD_RERANKER_ONNX=true
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     CONTEXT_COMPRESSION_MODE=rerank \
@@ -17,6 +19,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY scripts ./scripts
+
+RUN if [ "$PRELOAD_RERANKER_ONNX" = "true" ]; then \
+      python scripts/export_reranker_onnx.py \
+        --model-id "$CONTEXT_COMPRESSION_RERANKER_MODEL" \
+        --output "$CONTEXT_COMPRESSION_RERANKER_ONNX_PATH" \
+        --max-length 384 \
+        --opset 17 \
+        --cutoff-layer 28 \
+        --trust-remote-code \
+        --onnx-provider "$CONTEXT_COMPRESSION_RERANKER_ONNX_PROVIDER"; \
+    fi \
+    && rm -rf /root/.cache/huggingface
 
 EXPOSE 8000
 
