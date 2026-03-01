@@ -15,9 +15,6 @@ from app.core.config import settings
 from app.core.database import get_session
 from app.core.sse import sse_event
 from app.schemas.chat import (
-    ChatSessionDeleteResult,
-    ChatSessionRead,
-    ChatSessionUpdateRequest,
     ConsistencyAuditReportRead,
     ConsistencyAuditRunRequest,
     ConsistencyAuditRunResponse,
@@ -69,7 +66,6 @@ from app.services.chat_service import (
     get_project_chapter,
     get_prompt_template,
     list_cards,
-    list_project_sessions,
     list_prompt_template_revisions,
     list_prompt_templates,
     list_project_chapters,
@@ -83,7 +79,6 @@ from app.services.chat_service import (
     create_prompt_template,
     create_project_volume,
     create_scene_beat,
-    delete_session_with_children,
     delete_foreshadowing_card,
     delete_prompt_template,
     delete_project_volume,
@@ -99,7 +94,6 @@ from app.services.chat_service import (
     update_foreshadowing_card,
     update_project_volume,
     update_scene_beat,
-    update_session_title,
     consolidate_volume_memory,
     create_model_profile,
     update_model_profile,
@@ -131,9 +125,11 @@ from .chat_documents import router as documents_router
 from .chat_graph_ops import router as graph_ops_router
 from .chat_index_lifecycle import router as index_lifecycle_router
 from .chat_actions import router as actions_router
+from .chat_sessions import router as sessions_router
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 router.include_router(actions_router)
+router.include_router(sessions_router)
 router.include_router(documents_router)
 router.include_router(graph_ops_router)
 router.include_router(index_lifecycle_router)
@@ -765,61 +761,6 @@ async def generate_ghost_text(
         usage=usage,
         evidence_policy=evidence_policy,
     )
-
-
-@router.get("/projects/{project_id}/sessions", response_model=list[ChatSessionRead])
-def project_sessions(
-    project_id: int,
-    limit: int = Query(default=24, ge=1, le=100),
-    db: Session = Depends(get_session),
-    principal: AuthPrincipal = Depends(get_current_principal),
-):
-    _ensure_project_access(project_id, principal)
-    return list_project_sessions(
-        db,
-        project_id=project_id,
-        user_id=principal.user_id,
-        limit=limit,
-    )
-
-
-@router.put("/projects/{project_id}/sessions/{session_id}", response_model=ChatSessionRead)
-def rename_project_session(
-    project_id: int,
-    session_id: int,
-    payload: ChatSessionUpdateRequest,
-    db: Session = Depends(get_session),
-    principal: AuthPrincipal = Depends(get_current_principal),
-):
-    _ensure_project_access(project_id, principal)
-    _ensure_session_access(db, session_id, principal, expected_project_id=project_id)
-    try:
-        return update_session_title(
-            db,
-            session_id=session_id,
-            title=payload.title,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@router.delete("/projects/{project_id}/sessions/{session_id}", response_model=ChatSessionDeleteResult)
-def remove_project_session(
-    project_id: int,
-    session_id: int,
-    db: Session = Depends(get_session),
-    principal: AuthPrincipal = Depends(get_current_principal),
-):
-    _ensure_project_access(project_id, principal)
-    _ensure_session_access(db, session_id, principal, expected_project_id=project_id)
-    try:
-        deleted_session_id = delete_session_with_children(
-            db,
-            session_id=session_id,
-        )
-        return ChatSessionDeleteResult(deleted_session_id=deleted_session_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/projects/{project_id}/volumes", response_model=list[ProjectVolumeRead])
