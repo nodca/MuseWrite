@@ -1731,9 +1731,9 @@ type DraftWorkspacePanelProps = {
   ghostError: string | null;
   ghostAutoEnabled: boolean;
   onRequestGhostSuggestion: (forceRefresh?: boolean) => Promise<void>;
-  acceptGhostTextRef: { current: () => void };
-  rejectGhostTextRef: { current: () => void };
-  regenerateGhostTextRef: { current: () => Promise<void> };
+  onAcceptGhostText: () => void;
+  onRejectGhostText: () => void;
+  onRegenerateGhostText: () => Promise<void>;
   onToggleGhostAuto: () => void;
   onSaveDraftSnapshot: () => Promise<void>;
   onRefreshDraftSnapshot: (nextProjectId: number, preferredChapterId?: number | null) => Promise<void>;
@@ -1785,9 +1785,9 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
   ghostError,
   ghostAutoEnabled,
   onRequestGhostSuggestion,
-  acceptGhostTextRef,
-  rejectGhostTextRef,
-  regenerateGhostTextRef,
+  onAcceptGhostText,
+  onRejectGhostText,
+  onRegenerateGhostText,
   onToggleGhostAuto,
   onSaveDraftSnapshot,
   onRefreshDraftSnapshot,
@@ -1953,21 +1953,21 @@ const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
           </button>
           <button
             className="btn primary tiny"
-            onClick={acceptGhostTextRef.current}
+            onClick={onAcceptGhostText}
             disabled={!ghostText.trim() || ghostLoading || draftLoading || draftSaving}
           >
             接受
           </button>
           <button
             className="btn ghost tiny"
-            onClick={rejectGhostTextRef.current}
+            onClick={onRejectGhostText}
             disabled={!ghostText.trim() || ghostLoading}
           >
             拒绝
           </button>
           <button
             className="btn ghost tiny"
-            onClick={() => void regenerateGhostTextRef.current()}
+            onClick={() => void onRegenerateGhostText()}
             disabled={ghostLoading || !activeChapterId}
           >
             重生
@@ -5659,9 +5659,9 @@ export default function App() {
             ghostError={ghostError}
             ghostAutoEnabled={ghostAutoEnabled}
             onRequestGhostSuggestion={requestGhostSuggestion}
-            acceptGhostTextRef={acceptGhostTextRef}
-            rejectGhostTextRef={rejectGhostTextRef}
-            regenerateGhostTextRef={regenerateGhostTextRef}
+            onAcceptGhostText={acceptGhostText}
+            onRejectGhostText={rejectGhostText}
+            onRegenerateGhostText={regenerateGhostText}
             onToggleGhostAuto={toggleGhostAuto}
             onSaveDraftSnapshot={saveDraftSnapshot}
             onRefreshDraftSnapshot={refreshDraftSnapshot}
