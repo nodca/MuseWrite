@@ -40,14 +40,15 @@ class AuthBehaviorTestCase(unittest.TestCase):
         principal = get_current_principal("Bearer token-b")
         self.assertEqual(principal.user_id, "bob")
 
-    def test_auth_enabled_can_use_legacy_single_token_fallback(self) -> None:
+    def test_auth_enabled_rejects_legacy_single_token_fallback(self) -> None:
         settings.auth_enabled = True
         settings.auth_tokens = ""
         settings.auth_token = "legacy-token"
         settings.auth_user = "legacy-user"
 
-        principal = get_current_principal("Bearer legacy-token")
-        self.assertEqual(principal.user_id, "legacy-user")
+        with self.assertRaises(HTTPException) as missing_config:
+            get_current_principal("Bearer legacy-token")
+        self.assertEqual(missing_config.exception.status_code, 500)
 
     def test_auth_enabled_rejects_missing_or_invalid_token(self) -> None:
         settings.auth_enabled = True

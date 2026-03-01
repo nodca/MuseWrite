@@ -18,7 +18,7 @@ def _using_default_dev_token() -> bool:
         _, token = item.split(":", 1)
         if token.strip() == "local-dev-token":
             return True
-    return str(settings.auth_token or "").strip() == "local-dev-token"
+    return False
 
 
 def _emit_startup_security_notice() -> None:

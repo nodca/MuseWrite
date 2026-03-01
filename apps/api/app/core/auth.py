@@ -29,14 +29,7 @@ def _parse_token_mapping(raw: str) -> dict[str, str]:
 
 
 def _resolve_token_mapping() -> dict[str, str]:
-    mapped = _parse_token_mapping(settings.auth_tokens)
-    if mapped:
-        return mapped
-    fallback_token = str(settings.auth_token or "").strip()
-    fallback_user = str(settings.auth_user or "").strip()
-    if fallback_token and fallback_user:
-        return {fallback_token: fallback_user}
-    return {}
+    return _parse_token_mapping(settings.auth_tokens)
 
 
 def _parse_project_owner_mapping(raw: str) -> dict[int, set[str]]:
@@ -73,7 +66,7 @@ def get_current_principal(
     if not token_to_user:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="AUTH_TOKENS/AUTH_TOKEN is not configured",
+            detail="AUTH_TOKENS is not configured",
         )
 
     auth_header = str(authorization or "").strip()
