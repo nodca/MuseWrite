@@ -989,7 +989,7 @@ type AssistantChatPanelProps = {
   streaming: boolean;
   composerInputRef: { current: HTMLTextAreaElement | null };
   setInput: (value: string) => void;
-  handleSendRef: { current: () => Promise<void> };
+  onSend: () => Promise<void>;
 };
 
 const AssistantChatPanel = memo(function AssistantChatPanel({
@@ -999,7 +999,7 @@ const AssistantChatPanel = memo(function AssistantChatPanel({
   streaming,
   composerInputRef,
   setInput,
-  handleSendRef,
+  onSend,
 }: AssistantChatPanelProps) {
   return (
     <section className="panel chat-panel">
@@ -1035,7 +1035,7 @@ const AssistantChatPanel = memo(function AssistantChatPanel({
           rows={4}
           disabled={streaming}
         />
-        <button className="btn primary" onClick={() => void handleSendRef.current()} disabled={streaming || !input.trim()}>
+        <button className="btn primary" onClick={() => void onSend()} disabled={streaming || !input.trim()}>
           {streaming ? "发送中..." : "发送"}
         </button>
       </div>
@@ -1047,16 +1047,16 @@ type ActionCardProps = {
   action: ChatAction;
   isPending: boolean;
   controlsDisabled: boolean;
-  loadLogsRef: { current: (actionId: number) => Promise<void> };
-  mutateActionRef: { current: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void> };
+  onLoadLogs: (actionId: number) => Promise<void>;
+  onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
 };
 
 const ActionCard = memo(function ActionCard({
   action,
   isPending,
   controlsDisabled,
-  loadLogsRef,
-  mutateActionRef,
+  onLoadLogs,
+  onMutateAction,
 }: ActionCardProps) {
   const summaryLines = useMemo(() => summarizeAction(action), [action]);
   const riskHints = useMemo(() => actionRiskHints(action), [action]);
@@ -1093,7 +1093,7 @@ const ActionCard = memo(function ActionCard({
 
   return (
     <article className={cardClassName}>
-      <button type="button" className="action-summary" onClick={() => void loadLogsRef.current(action.id)}>
+      <button type="button" className="action-summary" onClick={() => void onLoadLogs(action.id)}>
         <span>#{action.id}</span>
         <strong>{action.action_type}</strong>
         <span className={`status ${action.status}`}>{action.status}</span>
@@ -1172,14 +1172,14 @@ const ActionCard = memo(function ActionCard({
           <>
             <button
               className="btn primary tiny"
-              onClick={() => void mutateActionRef.current(action, "apply")}
+              onClick={() => void onMutateAction(action, "apply")}
               disabled={controlsDisabled}
             >
               应用并记录
             </button>
             <button
               className="btn ghost tiny"
-              onClick={() => void mutateActionRef.current(action, "reject")}
+              onClick={() => void onMutateAction(action, "reject")}
               disabled={controlsDisabled}
             >
               不应用
@@ -1189,7 +1189,7 @@ const ActionCard = memo(function ActionCard({
         {action.status === "applied" ? (
           <button
             className="btn ghost tiny"
-            onClick={() => void mutateActionRef.current(action, "undo")}
+            onClick={() => void onMutateAction(action, "undo")}
             disabled={controlsDisabled}
           >
             撤销应用
@@ -2546,9 +2546,9 @@ type AssistantActionsPanelProps = {
   setGraphTimelineChapterIndex: (chapterIndex: number) => void;
   selectedActionId: number | null;
   actionLogs: ActionAuditLog[];
-  loadLogsRef: { current: (actionId: number) => Promise<void> };
-  mutateActionRef: { current: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void> };
-  runConsistencyAuditRef: { current: () => Promise<void> };
+  onLoadLogs: (actionId: number) => Promise<void>;
+  onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
+  onRunConsistencyAudit: () => Promise<void>;
 };
 
 const AssistantActionsPanel = memo(function AssistantActionsPanel({
@@ -2565,9 +2565,9 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
   setGraphTimelineChapterIndex,
   selectedActionId,
   actionLogs,
-  loadLogsRef,
-  mutateActionRef,
-  runConsistencyAuditRef,
+  onLoadLogs,
+  onMutateAction,
+  onRunConsistencyAudit,
 }: AssistantActionsPanelProps) {
   const pendingActionSet = useMemo(() => new Set(pendingActionIds), [pendingActionIds]);
   const latestAudits = useMemo(() => consistencyAudits.slice(0, 3), [consistencyAudits]);
@@ -2709,7 +2709,7 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
           <button
             type="button"
             className="btn ghost tiny"
-            onClick={() => void runConsistencyAuditRef.current()}
+            onClick={() => void onRunConsistencyAudit()}
             disabled={consistencyAuditRunning || mutatingActionId !== null}
           >
             {consistencyAuditRunning ? "体检中..." : "立即体检"}
@@ -2875,8 +2875,8 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
             action={action}
             isPending={pendingActionSet.has(action.id)}
             controlsDisabled={mutatingActionId !== null}
-            loadLogsRef={loadLogsRef}
-            mutateActionRef={mutateActionRef}
+            onLoadLogs={onLoadLogs}
+            onMutateAction={onMutateAction}
           />
         ))}
       </div>
@@ -2904,7 +2904,7 @@ type AssistantDrawerProps = {
   streaming: boolean;
   composerInputRef: { current: HTMLTextAreaElement | null };
   setInput: (value: string) => void;
-  handleSendRef: { current: () => Promise<void> };
+  onSend: () => Promise<void>;
   sortedActions: ChatAction[];
   pendingActionIds: number[];
   mutatingActionId: number | null;
@@ -2918,9 +2918,9 @@ type AssistantDrawerProps = {
   setGraphTimelineChapterIndex: (chapterIndex: number) => void;
   selectedActionId: number | null;
   actionLogs: ActionAuditLog[];
-  loadLogsRef: { current: (actionId: number) => Promise<void> };
-  mutateActionRef: { current: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void> };
-  runConsistencyAuditRef: { current: () => Promise<void> };
+  onLoadLogs: (actionId: number) => Promise<void>;
+  onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
+  onRunConsistencyAudit: () => Promise<void>;
 };
 
 const AssistantDrawer = memo(function AssistantDrawer({
@@ -2941,7 +2941,7 @@ const AssistantDrawer = memo(function AssistantDrawer({
   streaming,
   composerInputRef,
   setInput,
-  handleSendRef,
+  onSend,
   sortedActions,
   pendingActionIds,
   mutatingActionId,
@@ -2955,9 +2955,9 @@ const AssistantDrawer = memo(function AssistantDrawer({
   setGraphTimelineChapterIndex,
   selectedActionId,
   actionLogs,
-  loadLogsRef,
-  mutateActionRef,
-  runConsistencyAuditRef,
+  onLoadLogs,
+  onMutateAction,
+  onRunConsistencyAudit,
 }: AssistantDrawerProps) {
   const [sideTab, setSideTab] = useState<"actions" | "candidates">("actions");
 
@@ -3077,7 +3077,7 @@ const AssistantDrawer = memo(function AssistantDrawer({
             streaming={streaming}
             composerInputRef={composerInputRef}
             setInput={setInput}
-            handleSendRef={handleSendRef}
+            onSend={onSend}
           />
 
           <div className="assistant-tools-column">
@@ -3113,9 +3113,9 @@ const AssistantDrawer = memo(function AssistantDrawer({
                 setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
                 selectedActionId={selectedActionId}
                 actionLogs={actionLogs}
-                loadLogsRef={loadLogsRef}
-                mutateActionRef={mutateActionRef}
-                runConsistencyAuditRef={runConsistencyAuditRef}
+                onLoadLogs={onLoadLogs}
+                onMutateAction={onMutateAction}
+                onRunConsistencyAudit={onRunConsistencyAudit}
               />
             ) : (
               <Suspense
@@ -3371,11 +3371,6 @@ export default function App() {
   const acceptGhostTextRef = useRef<() => void>(() => undefined);
   const rejectGhostTextRef = useRef<() => void>(() => undefined);
   const regenerateGhostTextRef = useRef<() => Promise<void>>(async () => undefined);
-  const handleSendRef = useRef<() => Promise<void>>(async () => undefined);
-  const loadLogsRef = useRef<(actionId: number) => Promise<void>>(async () => undefined);
-  const mutateActionRef = useRef<
-    (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>
-  >(async () => undefined);
   const switchChapterRef = useRef<(chapterId: number) => Promise<void>>(async () => undefined);
   const reorderByDragRef = useRef<(targetChapterId: number) => Promise<void>>(async () => undefined);
   const handleOutlineDragStartRef = useRef<(chapterId: number) => void>(() => undefined);
@@ -3390,7 +3385,6 @@ export default function App() {
   >(async () => undefined);
   const fillPromptFromSelectionRef = useRef<(mode: "polish" | "expand") => void>(() => undefined);
   const applyAssistantToDraftRef = useRef<(mode: "insert" | "replace") => void>(() => undefined);
-  const runConsistencyAuditRef = useRef<() => Promise<void>>(async () => undefined);
   const refreshGraphTimelineRef = useRef<(chapterIndex: number) => Promise<void>>(async () => undefined);
   const actionLogsCacheRef = useRef<Map<number, ActionAuditLog[]>>(new Map());
   const actionLogsInFlightRef = useRef<Map<number, Promise<ActionAuditLog[]>>>(new Map());
@@ -5511,9 +5505,6 @@ export default function App() {
     }
   };
 
-  handleSendRef.current = handleSend;
-  loadLogsRef.current = loadLogs;
-  mutateActionRef.current = mutateAction;
   switchChapterRef.current = switchChapter;
   reorderByDragRef.current = reorderByDrag;
   handleOutlineDragStartRef.current = handleOutlineDragStart;
@@ -5526,7 +5517,6 @@ export default function App() {
   refreshDraftSnapshotRef.current = refreshDraftSnapshot;
   fillPromptFromSelectionRef.current = fillPromptFromSelection;
   applyAssistantToDraftRef.current = applyAssistantToDraft;
-  runConsistencyAuditRef.current = runConsistencyAudit;
   refreshGraphTimelineRef.current = refreshGraphTimeline;
 
   return (
@@ -5738,7 +5728,7 @@ export default function App() {
         streaming={streaming}
         composerInputRef={composerInputRef}
         setInput={setInput}
-        handleSendRef={handleSendRef}
+        onSend={handleSend}
         sortedActions={sortedActions}
         pendingActionIds={pendingActionIds}
         mutatingActionId={mutatingActionId}
@@ -5752,9 +5742,9 @@ export default function App() {
         setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
         selectedActionId={selectedActionId}
         actionLogs={actionLogs}
-        loadLogsRef={loadLogsRef}
-        mutateActionRef={mutateActionRef}
-        runConsistencyAuditRef={runConsistencyAuditRef}
+        onLoadLogs={loadLogs}
+        onMutateAction={mutateAction}
+        onRunConsistencyAudit={runConsistencyAudit}
       />
 
       {settingsDialogOpen ? (
