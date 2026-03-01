@@ -1,0 +1,151 @@
+services:
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-}
+        VITE_API_TOKEN: ${VITE_API_TOKEN:-local-dev-token}
+    container_name: novel_web
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: novel_api
+    environment: &api_worker_common_env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-novel_platform}
+      CONFIG_PROFILE: ${CONFIG_PROFILE:-local-dev}
+
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      AUTH_TOKENS: ${AUTH_TOKENS:-local-user:local-dev-token}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      AUTH_USER: ${AUTH_USER:-local-user}
+      AUTH_PROJECT_OWNERS: ${AUTH_PROJECT_OWNERS:-}
+      AUTH_DISABLED_USER: ${AUTH_DISABLED_USER:-local-user}
+
+      LLM_PROVIDER: ${LLM_PROVIDER:-stub}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+
+      LIGHTRAG_ENABLED: ${LIGHTRAG_ENABLED:-false}
+      LIGHTRAG_BASE_URL: ${LIGHTRAG_BASE_URL:-http://lightrag:9621}
+      LIGHTRAG_API_KEY: ${LIGHTRAG_API_KEY:-}
+
+      NEO4J_ENABLED: ${NEO4J_ENABLED:-true}
+      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
+      NEO4J_USERNAME: ${NEO4J_USERNAME:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4jpassword}
+      NEO4J_DATABASE: ${NEO4J_DATABASE:-neo4j}
+
+      RAG_ROUTE_POLICY: ${RAG_ROUTE_POLICY:-mix}
+      QUALITY_GATE_ENFORCE: ${QUALITY_GATE_ENFORCE:-false}
+      CITATION_POLICY: ${CITATION_POLICY:-off}
+      CITATION_MIN_COUNT: ${CITATION_MIN_COUNT:-1}
+      CONTEXT_WINDOW_PROFILE: ${CONTEXT_WINDOW_PROFILE:-balanced}
+      CONTEXT_COMPRESSION_MODE: ${CONTEXT_COMPRESSION_MODE:-rerank}
+
+      LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+
+      # Optional CI / regression overrides (kept for compatibility)
+      RAGAS_GATE_ENABLED: ${RAGAS_GATE_ENABLED:-false}
+      RAGAS_THRESHOLD: ${RAGAS_THRESHOLD:-0.55}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: novel_worker
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *api_worker_common_env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: novel_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-novel_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-novel_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: novel_neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-neo4jpassword}
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    restart: unless-stopped
+
+  lightrag:
+    image: ${LIGHTRAG_IMAGE:-ghcr.io/hkuds/lightrag:latest}
+    container_name: novel_lightrag
+    profiles: ["rag"]
+    environment:
+      OPENAI_API_KEY: ${LIGHTRAG_OPENAI_API_KEY:-}
+      WORKING_DIR: ${LIGHTRAG_WORKING_DIR:-/app/data/rag_storage}
+      INPUT_DIR: ${LIGHTRAG_INPUT_DIR:-/app/data/inputs}
+      TIMEOUT: ${LIGHTRAG_TIMEOUT:-300}
+      LLM_TIMEOUT: ${LIGHTRAG_LLM_TIMEOUT:-180}
+      EMBEDDING_TIMEOUT: ${LIGHTRAG_EMBEDDING_TIMEOUT:-180}
+      LLM_BINDING: ${LIGHTRAG_LLM_BINDING:-openai}
+      LLM_MODEL: ${LIGHTRAG_LLM_MODEL:-Qwen/Qwen3-8B}
+      LLM_BINDING_HOST: ${LIGHTRAG_LLM_BASE_URL:-https://api.siliconflow.cn/v1}
+      LLM_BINDING_API_KEY: ${LIGHTRAG_LLM_API_KEY:-}
+      EMBEDDING_BINDING: ${LIGHTRAG_EMBEDDING_BINDING:-openai}
+      EMBEDDING_MODEL: ${LIGHTRAG_EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DIM: ${LIGHTRAG_EMBEDDING_DIM:-1024}
+      EMBEDDING_BINDING_HOST: ${LIGHTRAG_EMBEDDING_BASE_URL:-https://api.siliconflow.cn/v1}
+      EMBEDDING_BINDING_API_KEY: ${LIGHTRAG_EMBEDDING_API_KEY:-}
+      RERANK_BY_DEFAULT: ${LIGHTRAG_RERANK_ENABLED:-true}
+      RERANK_BINDING: ${LIGHTRAG_RERANK_BINDING:-null}
+      RERANK_MODEL: ${LIGHTRAG_RERANK_MODEL:-}
+      RERANK_BINDING_HOST: ${LIGHTRAG_RERANK_BASE_URL:-}
+      RERANK_BINDING_API_KEY: ${LIGHTRAG_RERANK_API_KEY:-}
+    ports:
+      - "${LIGHTRAG_PORT:-9621}:9621"
+    volumes:
+      - lightrag_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  neo4j_data:
+  neo4j_logs:
+  lightrag_data:

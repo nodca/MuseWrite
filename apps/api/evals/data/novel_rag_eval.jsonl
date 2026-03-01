@@ -1,0 +1,12 @@
+{"id":"novel-v1-001","project_id":1,"subset":"global","pov_mode":"global","question":"林澈的核心动机和底线分别是什么？","ground_truth":"林澈的核心动机是复仇，底线是不伤无辜。"}
+{"id":"novel-v1-002","project_id":1,"subset":"global","pov_mode":"global","question":"周夜与林澈的关系如何变化？","ground_truth":"周夜与林澈从对立逐步转为有限合作，但仍互相提防。"}
+{"id":"novel-v1-003","project_id":1,"subset":"global","pov_mode":"global","question":"第一卷时间线上，风桥埋伏和黑潮夜战的先后顺序是什么？","ground_truth":"先发生风桥埋伏，再发生黑潮夜战。"}
+{"id":"novel-v1-004","project_id":1,"subset":"global","pov_mode":"global","question":"目前世界观里明示的三大势力是什么？","ground_truth":"明示的三大势力是曜庭、夜行会和盐港同盟。"}
+{"id":"novel-v1-005","project_id":1,"subset":"character","pov_mode":"character","pov_anchor":"周夜","question":"如果以周夜 POV 写作，最重要的信息边界是什么？","ground_truth":"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。"}
+{"id":"novel-v1-006","project_id":1,"subset":"global","pov_mode":"global","question":"设定里“潮印”能力在代价和限制上有什么关键规则？","ground_truth":"潮印短时强化但会透支精神，连续过度使用会触发幻听与记忆错位。"}
+{"id":"novel-v1-007","project_id":1,"subset":"character","pov_mode":"character","pov_anchor":"林澈","question":"从林澈视角看，他与曜庭的关系在当前设定里如何定义？","ground_truth":"林澈与曜庭是敌对关系。"}
+{"id":"novel-v1-008","project_id":1,"subset":"global","pov_mode":"global","question":"林澈与盐港同盟在设定里是什么关系？","ground_truth":"林澈与盐港同盟是临时合作关系。"}
+{"id":"novel-v1-009","project_id":1,"subset":"global","pov_mode":"global","question":"叙事中“灰钥”这个道具的功能和限制是什么？","ground_truth":"灰钥可短暂开启封印门，但每次使用会暴露使用者位置并增加被追踪风险。"}
+{"id":"novel-v1-010","project_id":1,"subset":"character","pov_mode":"character","pov_anchor":"林澈","question":"在北线事件中，若按林澈 POV，他的公开目标与隐性目标分别是什么？","ground_truth":"公开目标是护送证人入港，隐性目标是追查父亲旧案的真凶线索。"}
+{"id":"novel-v1-011","project_id":1,"subset":"character","pov_mode":"character","pov_anchor":"周夜","question":"黑潮夜战后，周夜对林澈态度的变化是什么？","ground_truth":"黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。"}
+{"id":"novel-v1-012","project_id":1,"subset":"global","pov_mode":"global","question":"如果写“风桥埋伏”回忆段，需要避免哪类时间线错误？","ground_truth":"应避免把风桥埋伏写在黑潮夜战之后，因为设定顺序是风桥埋伏在先。"}

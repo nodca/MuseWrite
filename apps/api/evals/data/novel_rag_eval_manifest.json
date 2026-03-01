@@ -1,0 +1,15 @@
+{
+  "dataset_name": "novel_rag_eval",
+  "dataset_version": "v1.1-frozen",
+  "frozen_at": "2026-02-27",
+  "owner": "novel-platform",
+  "project_id": 1,
+  "question_set": "apps/api/evals/data/novel_rag_eval.jsonl",
+  "fixture_docs_set": "apps/api/evals/data/novel_rag_docs.jsonl",
+  "default_threshold": 0.55,
+  "notes": [
+    "This manifest defines the frozen baseline for retrieval strategy regression.",
+    "Question set now includes explicit subset tags (global/character) for POV split scoring.",
+    "If question set or fixture docs changes, bump dataset_version and record changelog."
+  ]
+}

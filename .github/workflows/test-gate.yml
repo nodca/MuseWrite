@@ -1,0 +1,97 @@
+name: test-gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "apps/web/**"
+      - ".github/workflows/test-gate.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/**"
+      - "apps/web/**"
+      - ".github/workflows/test-gate.yml"
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API Test Dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt redis pytest
+
+      - name: Run API Unit Tests
+        env:
+          PYTHONPATH: apps/api
+        run: |
+          set -euo pipefail
+          pytest \
+            apps/api/tests/test_auth_unittest.py \
+            apps/api/tests/test_auth_integration_unittest.py \
+            apps/api/tests/test_chat_endpoint_edges_unittest.py \
+            apps/api/tests/test_chat_stream_endpoint_unittest.py \
+            apps/api/tests/test_pg_job_queue_unittest.py \
+            apps/api/tests/test_worker_unittest.py \
+            apps/api/tests/test_lightrag_endpoint_mapping_unittest.py \
+            apps/api/tests/test_lightrag_documents_service_unittest.py \
+            -q
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Playwright Browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Stable E2E Tests
+        env:
+          CI: "true"
+        run: npm run test:e2e -- --grep-invert "fixture-seeded"
+
+      # Optional: set repository secret E2E_API_TOKEN to enable fixture-seeded session tests.
+      - name: Run Fixture-Seeded Session E2E
+        if: ${{ secrets.E2E_API_TOKEN != '' }}
+        env:
+          CI: "true"
+          E2E_API_TOKEN: ${{ secrets.E2E_API_TOKEN }}
+        run: npm run test:e2e -- --grep "fixture-seeded"
+
+      - name: Upload Playwright Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: ignore

@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build artifacts
+dist/
+**/dist/
+*.tsbuildinfo
+
+# Python cache/artifacts
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+
+# Local env
+.env
+.env.*
+.gemini/

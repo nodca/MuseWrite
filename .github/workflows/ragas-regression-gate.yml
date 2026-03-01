@@ -1,0 +1,144 @@
+name: ragas-regression-gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/api/app/services/context_compiler.py"
+      - "apps/api/app/services/retrieval_adapters.py"
+      - "apps/api/app/services/chat_service.py"
+      - "apps/api/app/services/llm_provider.py"
+      - "apps/api/evals/**"
+      - ".github/workflows/ragas-regression-gate.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/api/app/services/context_compiler.py"
+      - "apps/api/app/services/retrieval_adapters.py"
+      - "apps/api/app/services/chat_service.py"
+      - "apps/api/app/services/llm_provider.py"
+      - "apps/api/evals/**"
+      - ".github/workflows/ragas-regression-gate.yml"
+
+jobs:
+  ragas-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Required Secrets
+        env:
+          LIGHTRAG_LLM_API_KEY: ${{ secrets.LIGHTRAG_LLM_API_KEY }}
+          LIGHTRAG_EMBEDDING_API_KEY: ${{ secrets.LIGHTRAG_EMBEDDING_API_KEY }}
+          LIGHTRAG_RERANK_API_KEY: ${{ secrets.LIGHTRAG_RERANK_API_KEY }}
+          OPENAI_COMPATIBLE_API_KEY: ${{ secrets.OPENAI_COMPATIBLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          for key in LIGHTRAG_LLM_API_KEY LIGHTRAG_EMBEDDING_API_KEY LIGHTRAG_RERANK_API_KEY OPENAI_COMPATIBLE_API_KEY; do
+            val="${!key:-}"
+            if [ -z "$val" ]; then
+              echo "Missing required secret: $key"
+              exit 1
+            fi
+          done
+
+      - name: Prepare .env
+        env:
+          LIGHTRAG_LLM_API_KEY: ${{ secrets.LIGHTRAG_LLM_API_KEY }}
+          LIGHTRAG_EMBEDDING_API_KEY: ${{ secrets.LIGHTRAG_EMBEDDING_API_KEY }}
+          LIGHTRAG_RERANK_API_KEY: ${{ secrets.LIGHTRAG_RERANK_API_KEY }}
+          OPENAI_COMPATIBLE_API_KEY: ${{ secrets.OPENAI_COMPATIBLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          cat >> .env <<EOF
+          LIGHTRAG_ENABLED=true
+          LLM_PROVIDER=openai_compatible
+          LLM_MODEL=Qwen/Qwen3-8B
+          LLM_BASE_URL=https://api.siliconflow.cn/v1
+          LLM_API_KEY=${OPENAI_COMPATIBLE_API_KEY}
+          LIGHTRAG_LLM_BINDING=openai
+          LIGHTRAG_LLM_MODEL=Qwen/Qwen3-8B
+          LIGHTRAG_LLM_BASE_URL=https://api.siliconflow.cn/v1
+          LIGHTRAG_LLM_API_KEY=${LIGHTRAG_LLM_API_KEY}
+          LIGHTRAG_EMBEDDING_BINDING=openai
+          LIGHTRAG_EMBEDDING_MODEL=BAAI/bge-m3
+          LIGHTRAG_EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
+          LIGHTRAG_EMBEDDING_API_KEY=${LIGHTRAG_EMBEDDING_API_KEY}
+          LIGHTRAG_RERANK_ENABLED=true
+          LIGHTRAG_RERANK_BINDING=openai
+          LIGHTRAG_RERANK_MODEL=BAAI/bge-reranker-v2-m3
+          LIGHTRAG_RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
+          LIGHTRAG_RERANK_API_KEY=${LIGHTRAG_RERANK_API_KEY}
+          EOF
+
+      - name: Start Services
+        run: |
+          set -euo pipefail
+          docker compose --profile rag up -d --build api worker lightrag postgres neo4j redis
+
+      - name: Wait API Ready
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 120); do
+            if curl -fsS http://localhost:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API not ready in time"
+          exit 1
+
+      - name: Install Eval Dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt -r apps/api/evals/requirements.txt
+
+      - name: Prepare Fixture Docs
+        run: |
+          set -euo pipefail
+          python apps/api/evals/prepare_fixture_docs.py \
+            --base-url http://localhost:8000 \
+            --project-id 1 \
+            --fixture-docs apps/api/evals/data/novel_rag_docs.jsonl \
+            --reset-existing \
+            --timeout-seconds 300
+
+      - name: Run RAGAS Regression Gate
+        run: |
+          set -euo pipefail
+          python apps/api/evals/run_ragas_gate.py \
+            --base-url http://localhost:8000 \
+            --dataset apps/api/evals/data/novel_rag_eval.jsonl \
+            --threshold 0.55 \
+            --rag-mode mix \
+            --baseline-report apps/api/evals/data/novel_rag_baseline.json \
+            --output apps/api/evals/out/ragas-report.json
+
+      - name: Upload RAGAS Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragas-report
+          path: apps/api/evals/out/ragas-report.json
+          if-no-files-found: ignore
+
+      - name: Show Service Logs On Failure
+        if: failure()
+        run: |
+          docker compose logs --tail=200 api worker lightrag || true
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker compose down -v || true
