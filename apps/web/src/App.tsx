@@ -21,6 +21,7 @@ import {
   deleteProjectChapter,
   decideAction,
   generateGhostText,
+  rewriteText,
   getActionLogs,
   getForeshadowingCards,
   getProjectConsistencyAudits,
@@ -1518,6 +1519,8 @@ type SettingsDialogProps = {
   model: string;
   setModel: (value: string) => void;
   modelProfiles: ModelProfile[];
+  ghostModelProfileId: string | null;
+  setGhostModelProfileId: (value: string | null) => void;
   selectedModelProfileId: string | null;
   setSelectedModelProfileId: (value: string | null) => void;
   modelProfileDraftIdInput: string;
@@ -1577,6 +1580,8 @@ const SettingsDialog = memo(function SettingsDialog({
   model,
   setModel,
   modelProfiles,
+  ghostModelProfileId,
+  setGhostModelProfileId,
   selectedModelProfileId,
   setSelectedModelProfileId,
   modelProfileDraftIdInput,
@@ -1627,6 +1632,30 @@ const SettingsDialog = memo(function SettingsDialog({
   setWritingTheme,
   streaming,
 }: SettingsDialogProps) {
+  const activeProfile = useMemo(() => {
+    return modelProfiles.find((profile) => Boolean(profile.is_active)) ?? null;
+  }, [modelProfiles]);
+
+  const resolvedWritingProfile = useMemo(() => {
+    const resolvedId = ghostModelProfileId ?? activeProfile?.profile_id ?? null;
+    if (!resolvedId) return null;
+    return modelProfiles.find((profile) => profile.profile_id === resolvedId) ?? null;
+  }, [activeProfile?.profile_id, ghostModelProfileId, modelProfiles]);
+
+  const writingProfileHint = useMemo(() => {
+    if (resolvedWritingProfile) {
+      const label = `${resolvedWritingProfile.name || resolvedWritingProfile.profile_id} (${resolvedWritingProfile.provider})`;
+      return ghostModelProfileId ? `当前生效：固定 → ${label}` : `当前生效：跟随 active → ${label}`;
+    }
+    if (ghostModelProfileId) {
+      return "当前生效：固定 Profile 未命中（将回退后端默认 LLM）";
+    }
+    if (activeProfile) {
+      return "当前生效：active Profile 未命中（将回退后端默认 LLM）";
+    }
+    return "当前生效：未配置（将回退后端默认 LLM）";
+  }, [activeProfile, ghostModelProfileId, resolvedWritingProfile]);
+
   return (
     <div className="settings-backdrop" role="presentation" onClick={onCloseSettingsDialog}>
       <section
@@ -1719,6 +1748,23 @@ const SettingsDialog = memo(function SettingsDialog({
                     onChange={(event) => setModel(event.target.value)}
                     disabled={streaming}
                   />
+                </label>
+                <label>
+                  写作专用 Profile（可空）
+                  <small className="field-help">影响 Ghost Text + 润色/扩写；留空时跟随当前激活 Profile。</small>
+                  <select
+                    value={ghostModelProfileId ?? ""}
+                    onChange={(event) => setGhostModelProfileId(event.target.value || null)}
+                    disabled={streaming || modelProfileSaving}
+                  >
+                    <option value="">跟随当前激活 Profile</option>
+                    {modelProfiles.map((profile) => (
+                      <option key={profile.profile_id} value={profile.profile_id}>
+                        {`${profile.is_active ? "★ " : ""}${profile.name || profile.profile_id} (${profile.provider})`}
+                      </option>
+                    ))}
+                  </select>
+                  <small className="field-help">{writingProfileHint}</small>
                 </label>
                 <label>
                   模型配置中心（Profile）
@@ -2780,6 +2826,7 @@ export default function App() {
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [selectedModelProfileId, setSelectedModelProfileId] = useState<string | null>(null);
   const [activeModelProfileId, setActiveModelProfileId] = useState<string | null>(null);
+  const [ghostModelProfileId, setGhostModelProfileId] = useState<string | null>(null);
   const [modelProfileDraftIdInput, setModelProfileDraftIdInput] = useState("");
   const [modelProfileName, setModelProfileName] = useState("");
   const [modelProfileProvider, setModelProfileProvider] = useState<
@@ -2795,6 +2842,7 @@ export default function App() {
   const [ghostText, setGhostText] = useState("");
   const [ghostLoading, setGhostLoading] = useState(false);
   const [ghostError, setGhostError] = useState<string | null>(null);
+  const [rewriteLoading, setRewriteLoading] = useState(false);
   const [ghostAutoEnabled, setGhostAutoEnabled] = useState(false);
   const [chatTemperatureProfile, setChatTemperatureProfile] = useState<"action" | "chat" | "brainstorm">("action");
   const [ghostTemperatureProfile, setGhostTemperatureProfile] = useState<
@@ -2841,6 +2889,38 @@ export default function App() {
     title: "第1章",
     content: "",
   });
+
+  const ghostModelProfileStorageKey = useMemo(() => {
+    return `novel-platform:ghost-model-profile:v1:${projectId}`;
+  }, [projectId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let stored: string | null = null;
+    try {
+      const raw = window.localStorage.getItem(ghostModelProfileStorageKey);
+      stored = raw && raw.trim() ? raw.trim() : null;
+    } catch {
+      stored = null;
+    }
+    if (stored && !modelProfiles.some((item) => item.profile_id === stored)) {
+      stored = null;
+    }
+    setGhostModelProfileId(stored);
+  }, [ghostModelProfileStorageKey, modelProfiles]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      if (!ghostModelProfileId) {
+        window.localStorage.removeItem(ghostModelProfileStorageKey);
+        return;
+      }
+      window.localStorage.setItem(ghostModelProfileStorageKey, ghostModelProfileId);
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [ghostModelProfileId, ghostModelProfileStorageKey]);
   const ghostCacheRef = useRef<Map<string, string>>(new Map());
   const ghostRequestRef = useRef(0);
   const typewriterRafRef = useRef<number | null>(null);
@@ -3698,7 +3778,7 @@ export default function App() {
       activeChapterId ?? 0,
       activeSceneBeatId ?? 0,
       promptPart,
-      activeModelProfileId ?? "no-profile",
+      (ghostModelProfileId ?? activeModelProfileId) ?? "no-profile",
       model.trim() || "default",
       ghostTemperatureProfile,
       temperatureOverride ?? "auto",
@@ -3738,7 +3818,7 @@ export default function App() {
         chapter_goal: ghostChapterGoal || null,
         active_roles: ghostActiveRoles.length > 0 ? ghostActiveRoles : null,
         model: model.trim() ? model.trim() : null,
-        model_profile_id: activeModelProfileId,
+        model_profile_id: ghostModelProfileId,
         temperature_profile: ghostTemperatureProfile,
         temperature_override: temperatureOverride,
       });
@@ -4090,18 +4170,52 @@ export default function App() {
   rejectGhostTextRef.current = rejectGhostText;
   regenerateGhostTextRef.current = regenerateGhostText;
 
-  const fillPromptFromSelection = (mode: "polish" | "expand") => {
+  const fillPromptFromSelection = async (mode: "polish" | "expand") => {
     if (!selectedDraftText) {
       setError("请先在正文工作区选中一段文本。");
       return;
     }
+    if (streaming) {
+      setError("当前会话正在生成中，请稍后再试。");
+      return;
+    }
+    if (rewriteLoading) return;
+
+    setRewriteLoading(true);
     setError(null);
-    const nextPrompt =
-      mode === "polish"
-        ? `请在不改变剧情事实、人设和时间线的前提下润色这段正文，输出润色后的完整段落：\n\n${selectedDraftText}`
-        : `请基于这段正文进行扩写，保持同一人称和语气，不引入越权设定，输出扩写后的完整段落：\n\n${selectedDraftText}`;
-    setInput(nextPrompt);
     openAssistantDrawerAndFocusComposer();
+
+    const localSeed = Date.now();
+    const assistantLocalId = `local-rewrite-${localSeed}`;
+    appendMessage({ id: assistantLocalId, role: "assistant", content: "", streaming: true });
+
+    try {
+      const response = await rewriteText({
+        project_id: projectId,
+        mode,
+        text: selectedDraftText,
+        model: model.trim() ? model.trim() : null,
+        model_profile_id: ghostModelProfileId,
+        temperature_profile: "chat",
+        temperature_override: temperatureOverride,
+      });
+      const result = (response.result || "").trim();
+      updateMessage(assistantLocalId, (item) => ({
+        ...item,
+        streaming: false,
+        content: result || "（写作模型返回为空）",
+      }));
+    } catch (rewriteError) {
+      const message = rewriteError instanceof Error ? rewriteError.message : "润色/扩写失败";
+      setError(message);
+      updateMessage(assistantLocalId, (item) => ({
+        ...item,
+        streaming: false,
+        content: item.content || `润色/扩写失败：${message}`,
+      }));
+    } finally {
+      setRewriteLoading(false);
+    }
   };
 
   const rollbackDraftToVersion = async (targetVersion: number) => {
@@ -5366,6 +5480,8 @@ export default function App() {
           model={model}
           setModel={setModel}
           modelProfiles={modelProfiles}
+          ghostModelProfileId={ghostModelProfileId}
+          setGhostModelProfileId={setGhostModelProfileId}
           selectedModelProfileId={selectedModelProfileId}
           setSelectedModelProfileId={setSelectedModelProfileId}
           modelProfileDraftIdInput={modelProfileDraftIdInput}
