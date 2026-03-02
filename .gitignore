@@ -23,3 +23,7 @@ __pycache__/
 .env
 .env.*
 .gemini/
+
+# Local workspace temp/model artifacts
+.tmp/
+apps/api/models/
