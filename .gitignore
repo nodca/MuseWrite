@@ -27,3 +27,6 @@ __pycache__/
 # Local workspace temp/model artifacts
 .tmp/
 apps/api/models/
+
+# Claude local workspace artifacts
+.claude/worktrees/
