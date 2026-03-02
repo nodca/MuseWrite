@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -45,7 +45,21 @@ class GhostTextRequest(BaseModel):
 class GhostTextResponse(BaseModel):
     suggestion: str
     usage: dict
-    evidence_policy: dict
+
+
+class RewriteRequest(BaseModel):
+    project_id: int
+    mode: Literal["polish", "expand"] = Field(default="polish")
+    text: str = Field(min_length=1, max_length=12000)
+    model: Optional[str] = Field(default=None, max_length=128)
+    temperature_profile: Optional[str] = Field(default=None, max_length=32)
+    temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    model_profile_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class RewriteResponse(BaseModel):
+    result: str
+    usage: dict
 
 
 class ChatMessageRead(BaseModel):

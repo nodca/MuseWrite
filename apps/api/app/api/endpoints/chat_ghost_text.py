@@ -68,19 +68,7 @@ async def generate_ghost_text(
         "injected_cards": 0,
         "ghost_context_mode": "light",
     }
-    notes = [
-        "Ghost Text 使用轻上下文（prefix_text + 可选模板风格约束）。",
-        "默认不调用 DSL/GRAPH/RAG，优先保证下一句响应速度。",
-    ]
-    if payload.prompt_template_id is not None and template is None:
-        notes.append(f"prompt_template_id={payload.prompt_template_id} 未命中，已忽略模板风格约束。")
-    if template is not None and not payload.style_guard:
-        notes.append("style_guard=false，已跳过模板风格约束。")
-    if str(payload.chapter_goal or "").strip():
-        notes.append("已注入当前章节目标（轻量上下文）。")
-    if payload.active_roles:
-        notes.append("已注入活跃角色列表（轻量上下文）。")
-
+    outline_hint_parts: list[str] = []
     normalized_chapter_goal = str(payload.chapter_goal or "").strip()
     if len(normalized_chapter_goal) > 220:
         normalized_chapter_goal = normalized_chapter_goal[:220]
@@ -104,31 +92,17 @@ async def generate_ghost_text(
         "chapter_goal": normalized_chapter_goal or None,
         "active_roles": normalized_active_roles,
     }
-    outline_context_meta: dict[str, Any] = {
-        "enabled": False,
-        "reason": "chapter_not_requested",
-        "requested_chapter_id": payload.chapter_id,
-        "requested_scene_beat_id": payload.scene_beat_id,
-        "selected_scene_beat_id": None,
-        "chapter_goal_injected": bool(normalized_chapter_goal),
-        "active_roles_injected": len(normalized_active_roles),
-    }
     outline_hint_parts: list[str] = []
     if normalized_chapter_goal:
         outline_hint_parts.append(f"当前章节目标：{normalized_chapter_goal}")
-        outline_context_meta["enabled"] = True
     if normalized_active_roles:
         outline_hint_parts.append(f"活跃角色：{'、'.join(normalized_active_roles)}")
-        outline_context_meta["enabled"] = True
+
     chapter_for_context = None
     if payload.chapter_id is not None:
         chapter = get_project_chapter(db, payload.project_id, payload.chapter_id)
-        if chapter is None:
-            outline_context_meta["reason"] = "chapter_not_found"
-            notes.append(f"chapter_id={payload.chapter_id} 未命中，已忽略卷纲/Beat 注入。")
-        else:
+        if chapter is not None:
             chapter_for_context = chapter
-            outline_context_meta["reason"] = "ok"
             volume_id = int(getattr(chapter, "volume_id", 0) or 0)
             if volume_id > 0:
                 volume = get_project_volume(db, payload.project_id, volume_id)
@@ -140,22 +114,14 @@ async def generate_ghost_text(
                         "title": str(getattr(volume, "title", "") or ""),
                         "outline_preview": volume_outline[:420],
                     }
-                    outline_context_meta["enabled"] = True
                     outline_hint_parts.append(
                         f"当前卷：{story_outline['volume']['title']}（卷纲：{volume_outline[:220] or '未填写'}）"
                     )
-                else:
-                    notes.append(f"volume_id={volume_id} 未命中，已忽略卷纲注入。")
-                    outline_context_meta["reason"] = "volume_not_found"
-            else:
-                outline_context_meta["reason"] = "volume_not_bound"
 
             beats = list(list_scene_beats(db, project_id=payload.project_id, chapter_id=payload.chapter_id))
             active_beat = None
             if payload.scene_beat_id is not None:
                 active_beat = next((item for item in beats if int(getattr(item, "id", 0) or 0) == int(payload.scene_beat_id)), None)
-                if active_beat is None:
-                    notes.append(f"scene_beat_id={payload.scene_beat_id} 未命中，已退回章节默认 Beat。")
             if active_beat is None and beats:
                 active_beat = next((item for item in beats if str(getattr(item, "status", "")) == "pending"), None)
             if active_beat is None and beats:
@@ -192,8 +158,6 @@ async def generate_ghost_text(
                     ),
                     "total": len(beats),
                 }
-                outline_context_meta["selected_scene_beat_id"] = int(getattr(active_beat, "id", 0) or 0)
-                outline_context_meta["enabled"] = True
                 outline_hint_parts.append(f"当前节拍：{story_outline['scene_beat']['active']['content']}")
                 if story_outline["scene_beat"]["previous"]:
                     outline_hint_parts.append(
@@ -203,40 +167,7 @@ async def generate_ghost_text(
                     outline_hint_parts.append(
                         f"下一节拍：{story_outline['scene_beat']['next']['content']}"
                     )
-            elif beats:
-                outline_context_meta["reason"] = "no_active_scene_beat"
-            else:
-                if outline_context_meta["reason"] == "ok":
-                    outline_context_meta["reason"] = "ok_no_scene_beats"
 
-    quality_gate = {
-        "degraded": False,
-        "degrade_reasons": [],
-        "citation_required": False,
-        "citation_count": 0,
-        "reranker_expected": False,
-        "reranker_effective": False,
-    }
-    providers = {
-        "dsl": "disabled_for_ghost_light_mode",
-        "graph": "disabled_for_ghost_light_mode",
-        "rag": "disabled_for_ghost_light_mode",
-    }
-    evidence_policy = {
-        "mode": "ghost",
-        "anchor": None,
-        "notes": notes,
-        "resolver_order": "PREFIX > TEMPLATE_STYLE",
-        "ranking_dimensions": "local_continuation + style_consistency",
-        "providers": providers,
-        "rag_route": {"mode": "disabled", "reason": "ghost_light_context"},
-        "rag_short_circuit": {"enabled": True, "reason": "ghost_light_context"},
-        "prompt_workshop": prompt_workshop_meta,
-        "runtime_options": {"thinking_enabled": False},
-        "outline_context": outline_context_meta,
-        "quality_gate": quality_gate,
-        "ghost_context_mode": "light",
-    }
     model_context = {
         "runtime_options": {"thinking_enabled": False, "scene_beat_id": payload.scene_beat_id},
         "current_chapter": (
@@ -263,20 +194,6 @@ async def generate_ghost_text(
             ),
             "knowledge_injection": {"settings": [], "cards": []},
             "meta": prompt_workshop_meta,
-        },
-        "evidence": {
-            "resolver_order": ["PREFIX", "TEMPLATE_STYLE"],
-            "ranking_dimensions": ["local_continuation", "style_consistency"],
-            "providers": providers,
-            "rag_route": {"mode": "disabled", "reason": "ghost_light_context"},
-            "rag_short_circuit": {"enabled": True, "reason": "ghost_light_context"},
-            "prompt_workshop": prompt_workshop_meta,
-            "outline_context": outline_context_meta,
-            "quality_gate": quality_gate,
-            "dsl_hits": [],
-            "graph_facts": [],
-            "semantic_hits": [],
-            "ghost_context_mode": "light",
         },
     }
 
@@ -310,5 +227,4 @@ async def generate_ghost_text(
     return GhostTextResponse(
         suggestion=suggestion,
         usage=usage,
-        evidence_policy=evidence_policy,
     )

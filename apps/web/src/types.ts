@@ -47,7 +47,21 @@ export interface GhostTextRequest {
 export interface GhostTextResponse {
   suggestion: string;
   usage: Record<string, unknown>;
-  evidence_policy: Record<string, unknown>;
+}
+
+export interface RewriteRequest {
+  project_id: number;
+  mode: "polish" | "expand";
+  text: string;
+  model: string | null;
+  temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;
+  temperature_override?: number | null;
+  model_profile_id?: string | null;
+}
+
+export interface RewriteResponse {
+  result: string;
+  usage: Record<string, unknown>;
 }
 
 export interface ChatStreamMetaEvent {

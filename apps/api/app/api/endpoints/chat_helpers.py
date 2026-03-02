@@ -244,7 +244,12 @@ def normalize_index_lifecycle_dead_letter_row(
     }
 
 
-def build_ghost_user_input(prefix_text: str, *, style_prefix: str = "", outline_hint: str = "") -> str:
+def build_ghost_user_input(
+    prefix_text: str,
+    *,
+    style_prefix: str = "",
+    outline_hint: str = "",
+) -> str:
     compact_prefix = (prefix_text or "").strip()
     if len(compact_prefix) > 1800:
         compact_prefix = compact_prefix[-1800:]
