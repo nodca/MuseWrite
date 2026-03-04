@@ -14,6 +14,59 @@ from app.core.config import settings
 MAX_ACTIONS = 3
 _GEMINI_CONTEXT_CACHE: dict[str, tuple[float, str]] = {}
 _GEMINI_CACHE_LOCK = Lock()
+_PROVIDER_CACHE_STATE: dict[str, dict[str, float]] = {}
+_PROVIDER_CACHE_STATE_LOCK = Lock()
+
+
+def _cache_state_key(provider: str, endpoint: str, model: str) -> str:
+    raw = f"{provider}|{endpoint}|{model}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_state_should_use(cache_key: str) -> bool:
+    now = time.time()
+    with _PROVIDER_CACHE_STATE_LOCK:
+        state = _PROVIDER_CACHE_STATE.get(cache_key)
+        if not isinstance(state, dict):
+            return True
+        disabled_until = float(state.get("disabled_until", 0.0) or 0.0)
+        if disabled_until > now:
+            return False
+        return True
+
+
+def _cache_state_record_hit(cache_key: str) -> None:
+    with _PROVIDER_CACHE_STATE_LOCK:
+        _PROVIDER_CACHE_STATE[cache_key] = {
+            "disabled_until": 0.0,
+            "zero_read_streak": 0.0,
+            "last_hit": time.time(),
+        }
+
+
+def _cache_state_record_zero_read(cache_key: str, *, disable_seconds: int = 600) -> None:
+    now = time.time()
+    with _PROVIDER_CACHE_STATE_LOCK:
+        state = _PROVIDER_CACHE_STATE.get(cache_key) or {}
+        streak = int(state.get("zero_read_streak", 0) or 0) + 1
+        disabled_until = float(state.get("disabled_until", 0.0) or 0.0)
+        if streak >= 2:
+            disabled_until = now + max(int(disable_seconds), 60)
+            streak = 0
+        _PROVIDER_CACHE_STATE[cache_key] = {
+            "disabled_until": disabled_until,
+            "zero_read_streak": float(streak),
+            "last_hit": float(state.get("last_hit", 0.0) or 0.0),
+        }
+
+
+def _cache_state_record_protocol_error(cache_key: str, *, disable_seconds: int = 900) -> None:
+    with _PROVIDER_CACHE_STATE_LOCK:
+        _PROVIDER_CACHE_STATE[cache_key] = {
+            "disabled_until": time.time() + max(int(disable_seconds), 60),
+            "zero_read_streak": 0.0,
+            "last_hit": 0.0,
+        }
 
 
 @dataclass
@@ -196,6 +249,7 @@ def _build_openai_user_messages(
     user_input: str,
     context: dict[str, Any] | None,
     thinking_enabled: bool,
+    include_cache_prefix: bool,
 ) -> list[dict[str, str]]:
     layers = _context_cache_layers(context)
     dynamic_segments = _build_dynamic_user_segments(
@@ -204,7 +258,7 @@ def _build_openai_user_messages(
         thinking_enabled=thinking_enabled,
     )
     messages: list[dict[str, str]] = []
-    if settings.context_cache_enabled:
+    if include_cache_prefix and settings.context_cache_enabled:
         static_prefix = str(layers.get("static_prefix", "") or "").strip()
         persistent_prefix = str(layers.get("persistent_prefix", "") or "").strip()
         session_prefix = str(layers.get("session_prefix", "") or "").strip()
@@ -414,7 +468,6 @@ def _compact_context(context: dict[str, Any] | None) -> dict[str, Any]:
             safe_prompt_workshop["template"] = {
                 "id": template.get("id"),
                 "name": str(template.get("name", "")),
-                "system_prompt": _truncate_text(str(template.get("system_prompt", "")), 1800),
                 "user_prompt_prefix": _truncate_text(str(template.get("user_prompt_prefix", "")), 1000),
             }
         if isinstance(knowledge, dict):
@@ -970,12 +1023,16 @@ async def _generate_openai_compatible(
         temperature_profile=temperature_profile,
         temperature_override=temperature_override,
     )
+    cache_state_key = _cache_state_key(provider_name, endpoint, model)
+    cache_allowed = bool(settings.context_cache_enabled and _cache_state_should_use(cache_state_key))
+    prompt_cache_key = _openai_prompt_cache_key(provider_name, model, context) if cache_allowed else None
     messages = [{"role": "system", "content": _build_system_prompt(context, thinking_enabled=thinking_enabled)}]
     messages.extend(
         _build_openai_user_messages(
             user_input=user_input,
             context=context,
             thinking_enabled=thinking_enabled,
+            include_cache_prefix=bool(prompt_cache_key),
         )
     )
     body = {
@@ -986,13 +1043,13 @@ async def _generate_openai_compatible(
         "response_format": {"type": "json_object"},
         "max_tokens": int(settings.llm_max_output_tokens),
     }
-    prompt_cache_key = _openai_prompt_cache_key(provider_name, model, context)
     if prompt_cache_key:
         body["prompt_cache_key"] = prompt_cache_key
 
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout = httpx.Timeout(float(settings.llm_timeout_seconds))
     data: dict[str, Any]
+    cache_fallback_disabled = False
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(endpoint, json=body, headers=headers)
@@ -1000,11 +1057,23 @@ async def _generate_openai_compatible(
             data = resp.json()
         except httpx.HTTPStatusError as exc:
             if prompt_cache_key and exc.response is not None and exc.response.status_code in {400, 422}:
+                _cache_state_record_protocol_error(cache_state_key)
                 fallback_body = dict(body)
                 fallback_body.pop("prompt_cache_key", None)
+                fallback_body["messages"] = [
+                    {"role": "system", "content": _build_system_prompt(context, thinking_enabled=thinking_enabled)},
+                    *_build_openai_user_messages(
+                        user_input=user_input,
+                        context=context,
+                        thinking_enabled=thinking_enabled,
+                        include_cache_prefix=False,
+                    ),
+                ]
                 retry = await client.post(endpoint, json=fallback_body, headers=headers)
                 retry.raise_for_status()
                 data = retry.json()
+                cache_fallback_disabled = True
+                prompt_cache_key = None
             else:
                 raise
 
@@ -1042,7 +1111,12 @@ async def _generate_openai_compatible(
         "total_tokens": usage_raw.get("total_tokens"),
         "prompt_cache_key": prompt_cache_key,
         "cached_tokens": cache_read_tokens,
+        "cache_fallback_disabled": cache_fallback_disabled,
     }
+    if prompt_cache_key and cache_read_tokens and int(cache_read_tokens) > 0:
+        _cache_state_record_hit(cache_state_key)
+    elif prompt_cache_key:
+        _cache_state_record_zero_read(cache_state_key)
     return ChatGenerationResult(assistant_text=assistant_text, proposed_actions=actions, usage=usage)
 
 
@@ -1051,6 +1125,7 @@ def _anthropic_message_blocks(
     user_input: str,
     context: dict[str, Any] | None,
     thinking_enabled: bool,
+    include_cache_prefix: bool,
 ) -> list[dict[str, Any]]:
     layers = _context_cache_layers(context)
     dynamic_segments = _build_dynamic_user_segments(
@@ -1059,7 +1134,7 @@ def _anthropic_message_blocks(
         thinking_enabled=thinking_enabled,
     )
     blocks: list[dict[str, Any]] = []
-    if settings.context_cache_enabled:
+    if include_cache_prefix and settings.context_cache_enabled:
         static_prefix = str(layers.get("static_prefix", "") or "").strip()
         persistent_prefix = str(layers.get("persistent_prefix", "") or "").strip()
         if static_prefix:
@@ -1107,10 +1182,13 @@ async def _generate_anthropic(
         temperature_profile=temperature_profile,
         temperature_override=temperature_override,
     )
+    cache_state_key = _cache_state_key("anthropic", endpoint, model)
+    cache_allowed = bool(settings.context_cache_enabled and _cache_state_should_use(cache_state_key))
     message_blocks = _anthropic_message_blocks(
         user_input=user_input,
         context=context,
         thinking_enabled=thinking_enabled,
+        include_cache_prefix=cache_allowed,
     )
     body: dict[str, Any] = {
         "model": model,
@@ -1128,7 +1206,7 @@ async def _generate_anthropic(
         "x-api-key": api_key,
         "anthropic-version": str(settings.anthropic_version or "2023-06-01"),
     }
-    if settings.context_cache_enabled:
+    if cache_allowed:
         beta = str(settings.anthropic_prompt_caching_beta or "").strip()
         if beta:
             headers["anthropic-beta"] = beta
@@ -1144,13 +1222,13 @@ async def _generate_anthropic(
             status_code = exc.response.status_code if exc.response is not None else None
             has_cache_control = any(isinstance(item, dict) and "cache_control" in item for item in message_blocks)
             if status_code in {400, 422} and has_cache_control:
-                retry_blocks: list[dict[str, Any]] = []
-                for item in message_blocks:
-                    if not isinstance(item, dict):
-                        continue
-                    next_item = dict(item)
-                    next_item.pop("cache_control", None)
-                    retry_blocks.append(next_item)
+                _cache_state_record_protocol_error(cache_state_key)
+                retry_blocks = _anthropic_message_blocks(
+                    user_input=user_input,
+                    context=context,
+                    thinking_enabled=thinking_enabled,
+                    include_cache_prefix=False,
+                )
                 retry_body = dict(body)
                 retry_body["messages"] = [{"role": "user", "content": retry_blocks}]
                 retry_headers = dict(headers)
@@ -1209,6 +1287,10 @@ async def _generate_anthropic(
         "cache_read_input_tokens": cache_read_input_tokens,
         "cache_fallback_disabled": cache_fallback_disabled,
     }
+    if cache_allowed and cache_read_input_tokens and int(cache_read_input_tokens) > 0:
+        _cache_state_record_hit(cache_state_key)
+    elif cache_allowed:
+        _cache_state_record_zero_read(cache_state_key)
     return ChatGenerationResult(assistant_text=assistant_text, proposed_actions=actions, usage=usage)
 
 
@@ -1316,15 +1398,19 @@ async def _generate_gemini(
     persistent_prefix = str(layers.get("persistent_prefix", "") or "")
     session_prefix = str(layers.get("session_prefix", "") or "")
     stable_prefix_hash = str(layers.get("stable_prefix_hash", "") or "")
-    cached_content_name = await _ensure_gemini_cached_content(
-        base_url=base_url,
-        api_key=api_key,
-        model_path=model_path,
-        system_prompt=system_prompt,
-        static_prefix=static_prefix,
-        persistent_prefix=persistent_prefix,
-        cache_hash=stable_prefix_hash,
-    )
+    cache_state_key = _cache_state_key("gemini", endpoint, model_path)
+    cache_allowed = bool(settings.context_cache_enabled and _cache_state_should_use(cache_state_key))
+    cached_content_name = None
+    if cache_allowed:
+        cached_content_name = await _ensure_gemini_cached_content(
+            base_url=base_url,
+            api_key=api_key,
+            model_path=model_path,
+            system_prompt=system_prompt,
+            static_prefix=static_prefix,
+            persistent_prefix=persistent_prefix,
+            cache_hash=stable_prefix_hash,
+        )
 
     parts: list[str] = []
     if session_prefix:
@@ -1359,6 +1445,7 @@ async def _generate_gemini(
             headers={"Content-Type": "application/json"},
         )
         if response.status_code in {400, 404} and body.get("cachedContent"):
+            _cache_state_record_protocol_error(cache_state_key)
             retry_body = dict(body)
             retry_body.pop("cachedContent", None)
             retry = await client.post(
@@ -1403,6 +1490,11 @@ async def _generate_gemini(
         "cached_content": cached_content_name,
         "cached_tokens": usage_metadata.get("cachedContentTokenCount"),
     }
+    cached_tokens = usage_metadata.get("cachedContentTokenCount")
+    if cached_content_name and cached_tokens and int(cached_tokens) > 0:
+        _cache_state_record_hit(cache_state_key)
+    elif cached_content_name:
+        _cache_state_record_zero_read(cache_state_key)
     return ChatGenerationResult(assistant_text=assistant_text, proposed_actions=actions, usage=usage)
 
 
