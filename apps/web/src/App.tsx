@@ -21,7 +21,6 @@ import {
   deleteProjectChapter,
   decideAction,
   generateGhostText,
-  rewriteText,
   getActionLogs,
   getForeshadowingCards,
   getProjectConsistencyAudits,
@@ -2842,7 +2841,6 @@ export default function App() {
   const [ghostText, setGhostText] = useState("");
   const [ghostLoading, setGhostLoading] = useState(false);
   const [ghostError, setGhostError] = useState<string | null>(null);
-  const [rewriteLoading, setRewriteLoading] = useState(false);
   const [ghostAutoEnabled, setGhostAutoEnabled] = useState(false);
   const [chatTemperatureProfile, setChatTemperatureProfile] = useState<"action" | "chat" | "brainstorm">("action");
   const [ghostTemperatureProfile, setGhostTemperatureProfile] = useState<
@@ -4179,42 +4177,39 @@ export default function App() {
       setError("当前会话正在生成中，请稍后再试。");
       return;
     }
-    if (rewriteLoading) return;
+    if (ghostLoading) return;
 
-    setRewriteLoading(true);
+    setGhostLoading(true);
+    setGhostError(null);
     setError(null);
-    openAssistantDrawerAndFocusComposer();
 
-    const localSeed = Date.now();
-    const assistantLocalId = `local-rewrite-${localSeed}`;
-    appendMessage({ id: assistantLocalId, role: "assistant", content: "", streaming: true });
-
+    const requestId = ghostRequestRef.current + 1;
+    ghostRequestRef.current = requestId;
     try {
-      const response = await rewriteText({
+      const result = await generateGhostText({
         project_id: projectId,
         mode,
+        chapter_id: activeChapterId,
+        scene_beat_id: activeSceneBeatId,
+        prompt_template_id: activePromptTemplateId,
         text: selectedDraftText,
         model: model.trim() ? model.trim() : null,
         model_profile_id: ghostModelProfileId,
         temperature_profile: "chat",
         temperature_override: temperatureOverride,
       });
-      const result = (response.result || "").trim();
-      updateMessage(assistantLocalId, (item) => ({
-        ...item,
-        streaming: false,
-        content: result || "（写作模型返回为空）",
-      }));
+      if (ghostRequestRef.current !== requestId) return;
+      setGhostText((result.suggestion || "").trim());
     } catch (rewriteError) {
+      if (ghostRequestRef.current !== requestId) return;
       const message = rewriteError instanceof Error ? rewriteError.message : "润色/扩写失败";
+      setGhostError(message);
+      setGhostText("");
       setError(message);
-      updateMessage(assistantLocalId, (item) => ({
-        ...item,
-        streaming: false,
-        content: item.content || `润色/扩写失败：${message}`,
-      }));
     } finally {
-      setRewriteLoading(false);
+      if (ghostRequestRef.current === requestId) {
+        setGhostLoading(false);
+      }
     }
   };
 

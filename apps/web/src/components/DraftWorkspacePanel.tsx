@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { EditorContent, type Editor } from "@tiptap/react";
 import { FixedSizeList, type ListChildComponentProps } from "react-window";
 
@@ -231,7 +231,7 @@ export type DraftWorkspacePanelProps = {
   onSaveDraftSnapshot: () => Promise<void>;
   onRefreshDraftSnapshot: (nextProjectId: number, preferredChapterId?: number | null) => Promise<void>;
   projectId: number;
-  onFillPromptFromSelection: (mode: "polish" | "expand") => void;
+  onFillPromptFromSelection: (mode: "polish" | "expand") => Promise<void>;
   onApplyAssistantToDraft: (mode: "insert" | "replace") => void;
   selectedDraftText: string;
   latestAssistantReply: string;
@@ -306,6 +306,9 @@ export const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
     return `ghost-${trimmed.length}-${trimmed.slice(0, 24)}-${trimmed.slice(-24)}`;
   }, [ghostText]);
   const [chapterSwitching, setChapterSwitching] = useState(false);
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number } | null>(null);
+  const selectionMenuRef = useRef<HTMLDivElement | null>(null);
+  const selectionMenuButtonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
   useEffect(() => {
     if (!activeChapterId || typeof window === "undefined") return;
@@ -313,6 +316,78 @@ export const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
     const timer = window.setTimeout(() => setChapterSwitching(false), 200);
     return () => window.clearTimeout(timer);
   }, [activeChapterId]);
+
+  useEffect(() => {
+    if (selectedDraftText.trim()) return;
+    setSelectionMenu(null);
+  }, [selectedDraftText]);
+
+  useEffect(() => {
+    if (!selectionMenu || typeof window === "undefined") return;
+    const close = () => setSelectionMenu(null);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("click", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("click", close);
+    };
+  }, [selectionMenu]);
+
+  useEffect(() => {
+    if (!selectionMenu) return;
+    const timer = window.setTimeout(() => {
+      selectionMenuButtonsRef.current[0]?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [selectionMenu]);
+
+  const handleEditorContextMenu = (event: MouseEvent<HTMLDivElement>) => {
+    if (!selectedDraftText.trim()) {
+      setSelectionMenu(null);
+      return;
+    }
+    event.preventDefault();
+    setSelectionMenu({ x: event.clientX, y: event.clientY });
+  };
+
+  const runSelectionTool = (mode: "polish" | "expand") => {
+    void onFillPromptFromSelection(mode);
+    setSelectionMenu(null);
+  };
+
+  const handleSelectionMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!selectionMenu) return;
+    const buttons = selectionMenuButtonsRef.current.filter((item): item is HTMLButtonElement => Boolean(item));
+    if (buttons.length === 0) return;
+    const currentIndex = Math.max(
+      0,
+      buttons.findIndex((item) => item === (document.activeElement as HTMLButtonElement | null))
+    );
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSelectionMenu(null);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const next = (currentIndex + 1) % buttons.length;
+      buttons[next]?.focus();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const next = (currentIndex - 1 + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      (document.activeElement as HTMLButtonElement | null)?.click();
+    }
+  };
 
   const onboardingItems = [
     { id: "role", label: "创建第一个角色卡片", done: onboardingChecklist.hasRoleCard },
@@ -345,7 +420,7 @@ export const DraftWorkspacePanel = memo(function DraftWorkspacePanel({
         <button className="btn ghost tiny" onClick={() => void onMoveActiveChapter("down")} disabled={draftLoading || draftSaving || !canMoveChapterDown}>下移</button>
         <button className="btn ghost tiny" onClick={() => void onDeleteActiveChapter()} disabled={draftLoading || draftSaving || !activeChapterId}>删除章节</button>
       </div>
-      {chapters.length === 0 ? <section className="draft-empty-state" aria-live="polite"><h3>从第一章开始</h3><p>当前项目还没有章节。点击下面按钮即可创建第一章并进入写作。</p><button type="button" className="btn primary" onClick={() => void onCreateChapterAndSwitch()} disabled={draftLoading || draftSaving}>点击新建章节开始写作</button></section> : <><div className="awareness-strip" aria-live="polite"><small>AI 当前认知</small><div className="awareness-tags">{awarenessTags.length === 0 ? <span className="awareness-empty">等待会话建立上下文</span> : awarenessTags.map((tag) => <span key={tag} className="awareness-tag">#{tag}</span>)}</div></div><div className={`draft-editor-shell ${draftFocusMode ? "focus-mode" : ""} ${chapterSwitching ? "chapter-switching" : ""}`}><div className="draft-editor-toolbar"><div className="draft-editor-status"><small>编辑模式：{draftFocusMode ? "专注" : "标准"} · 零感保存：{autoSaveState === "pending" ? "等待中" : null}{autoSaveState === "saving" ? "保存中" : null}{autoSaveState === "saved" ? `已保存(${formatDateTime(autoSaveAt)})` : null}{autoSaveState === "error" ? "失败" : null}{autoSaveState === "idle" ? "空闲" : null}</small><small>打字机滚动：{typewriterModeEnabled ? "开启" : "关闭"}</small>{localRecoveryNotice ? <small className="recovery-note">{localRecoveryNotice}</small> : null}</div><div className="draft-toolbar-actions"><button type="button" className="btn ghost tiny" onClick={onToggleTypewriterMode} disabled={draftLoading || !activeChapterId}>{typewriterModeEnabled ? "关闭打字机滚动" : "开启打字机滚动"}</button><button type="button" className="btn ghost tiny" onClick={onToggleDraftFocusMode} disabled={draftLoading || !activeChapterId}>{draftFocusMode ? "退出专注" : "进入专注"}</button><button type="button" className="btn ghost tiny" onClick={onToggleZenMode} disabled={draftLoading || !activeChapterId || uiMode !== "writing"} aria-pressed={zenMode}>{zenMode ? "退出沉浸" : "进入沉浸"}</button></div></div><EditorContent ref={draftEditorRef} editor={editor} className={`draft-editor ${draftLoading || !activeChapterId ? "disabled" : ""}`} /></div><div className="ghost-panel"><div className="ghost-head"><strong>Ghost Text</strong><small>{ghostLoading ? "生成中..." : ghostText ? "已就绪" : "等待输入"}{ghostError ? ` · ${ghostError}` : ""}</small></div><pre key={ghostPreviewKey} className={`ghost-preview ${ghostText.trim() ? "ready" : ""}`}>{ghostText || (ghostAutoEnabled ? "继续输入正文，系统会自动给出下一句建议。" : "当前为手动触发，点击“生成建议”获取 Ghost Text。")}</pre><div className="action-ops"><button className="btn ghost tiny" onClick={() => void onRequestGhostSuggestion(false)} disabled={ghostLoading || draftLoading || draftSaving || !activeChapterId}>生成建议</button><button className="btn primary tiny" onClick={onAcceptGhostText} disabled={!ghostText.trim() || ghostLoading || draftLoading || draftSaving}>接受</button><button className="btn ghost tiny" onClick={onRejectGhostText} disabled={!ghostText.trim() || ghostLoading}>拒绝</button><button className="btn ghost tiny" onClick={() => void onRegenerateGhostText()} disabled={ghostLoading || !activeChapterId}>重生</button><button className="btn ghost tiny" onClick={onToggleGhostAuto} disabled={ghostLoading}>{ghostAutoEnabled ? "改为手动" : "改为自动"}</button></div><p className="ghost-shortcuts">快捷键：Tab 接受 · Esc 拒绝 · Alt + ] 重生</p></div><div className="draft-actions"><button className="btn primary tiny" onClick={() => void onSaveDraftSnapshot()} disabled={draftSaving || draftLoading}>{draftSaving ? "保存中..." : "保存正文"}</button><button className="btn ghost tiny" onClick={() => void onRefreshDraftSnapshot(projectId, activeChapterId)} disabled={draftSaving || draftLoading}>拉取服务器版本</button><button className="btn ghost tiny" onClick={() => onFillPromptFromSelection("polish")}>润色选中</button><button className="btn ghost tiny" onClick={() => onFillPromptFromSelection("expand")}>扩写选中</button><button className="btn primary tiny" onClick={() => onApplyAssistantToDraft("insert")}>插入助手回复</button><button className="btn ghost tiny" onClick={() => onApplyAssistantToDraft("replace")}>替换选中为助手回复</button></div><p className="draft-hint">{draftLoading ? "正在加载服务器正文..." : `已选 ${selectedDraftText.length} 字`}{latestAssistantReply ? " · 最近一条助手回复可写回正文" : " · 暂无助手回复可写回"}</p><div className="chapter-outline"><div className="panel-title sub"><h3>章节大纲</h3><small>拖拽排序 + 点击切章</small></div><ChapterOutlineList chapterOutlines={chapterOutlines} activeChapterId={activeChapterId} dragChapterId={dragChapterId} disabled={draftLoading || draftSaving} onDragStart={onOutlineDragStart} onDragEnd={onOutlineDragEnd} onReorder={onReorderByDrag} onSelect={onSwitchChapter} /></div><DraftRevisionList draftRevisions={draftRevisions} disabled={draftSaving || draftLoading} onRollbackDraftToVersion={onRollbackDraftToVersion} /></>}
+      {chapters.length === 0 ? <section className="draft-empty-state" aria-live="polite"><h3>从第一章开始</h3><p>当前项目还没有章节。点击下面按钮即可创建第一章并进入写作。</p><button type="button" className="btn primary" onClick={() => void onCreateChapterAndSwitch()} disabled={draftLoading || draftSaving}>点击新建章节开始写作</button></section> : <><div className="awareness-strip" aria-live="polite"><small>AI 当前认知</small><div className="awareness-tags">{awarenessTags.length === 0 ? <span className="awareness-empty">等待会话建立上下文</span> : awarenessTags.map((tag) => <span key={tag} className="awareness-tag">#{tag}</span>)}</div></div><div className={`draft-editor-shell ${draftFocusMode ? "focus-mode" : ""} ${chapterSwitching ? "chapter-switching" : ""}`}><div className="draft-editor-toolbar"><div className="draft-editor-status"><small>编辑模式：{draftFocusMode ? "专注" : "标准"} · 零感保存：{autoSaveState === "pending" ? "等待中" : null}{autoSaveState === "saving" ? "保存中" : null}{autoSaveState === "saved" ? `已保存(${formatDateTime(autoSaveAt)})` : null}{autoSaveState === "error" ? "失败" : null}{autoSaveState === "idle" ? "空闲" : null}</small><small>打字机滚动：{typewriterModeEnabled ? "开启" : "关闭"}</small>{localRecoveryNotice ? <small className="recovery-note">{localRecoveryNotice}</small> : null}</div><div className="draft-toolbar-actions"><button type="button" className="btn ghost tiny" onClick={onToggleTypewriterMode} disabled={draftLoading || !activeChapterId}>{typewriterModeEnabled ? "关闭打字机滚动" : "开启打字机滚动"}</button><button type="button" className="btn ghost tiny" onClick={onToggleDraftFocusMode} disabled={draftLoading || !activeChapterId}>{draftFocusMode ? "退出专注" : "进入专注"}</button><button type="button" className="btn ghost tiny" onClick={onToggleZenMode} disabled={draftLoading || !activeChapterId || uiMode !== "writing"} aria-pressed={zenMode}>{zenMode ? "退出沉浸" : "进入沉浸"}</button></div></div><div className="draft-editor-context" onContextMenu={handleEditorContextMenu}><EditorContent ref={draftEditorRef} editor={editor} className={`draft-editor ${draftLoading || !activeChapterId ? "disabled" : ""}`} />{selectionMenu ? <div ref={selectionMenuRef} className="selection-context-menu" role="menu" tabIndex={-1} onKeyDown={handleSelectionMenuKeyDown} style={{ left: `${selectionMenu.x}px`, top: `${selectionMenu.y}px` }}><button ref={(el) => { selectionMenuButtonsRef.current[0] = el; }} className="btn ghost tiny" onClick={() => runSelectionTool("polish")} role="menuitem">✨ 润色选中</button><button ref={(el) => { selectionMenuButtonsRef.current[1] = el; }} className="btn ghost tiny" onClick={() => runSelectionTool("expand")} role="menuitem">🧩 扩写选中</button></div> : null}</div></div><div className="ghost-panel"><div className="ghost-head"><strong>Ghost Text</strong><small>{ghostLoading ? "生成中..." : ghostText ? "已就绪" : "等待输入"}{ghostError ? ` · ${ghostError}` : ""}</small></div><pre key={ghostPreviewKey} className={`ghost-preview ${ghostText.trim() ? "ready" : ""}`}>{ghostText || (ghostAutoEnabled ? "继续输入正文，系统会自动给出下一句建议。" : "当前为手动触发，点击“生成建议”获取 Ghost Text。")}</pre><div className="action-ops"><button className="btn ghost tiny" onClick={() => void onRequestGhostSuggestion(false)} disabled={ghostLoading || draftLoading || draftSaving || !activeChapterId}>生成建议</button><button className="btn primary tiny" onClick={onAcceptGhostText} disabled={!ghostText.trim() || ghostLoading || draftLoading || draftSaving}>接受</button><button className="btn ghost tiny" onClick={onRejectGhostText} disabled={!ghostText.trim() || ghostLoading}>拒绝</button><button className="btn ghost tiny" onClick={() => void onRegenerateGhostText()} disabled={ghostLoading || !activeChapterId}>重生</button><button className="btn ghost tiny" onClick={onToggleGhostAuto} disabled={ghostLoading}>{ghostAutoEnabled ? "改为手动" : "改为自动"}</button></div><p className="ghost-shortcuts">快捷键：Tab 接受 · Esc 拒绝 · Alt + ] 重生</p></div><div className="draft-actions"><button className="btn primary tiny" onClick={() => void onSaveDraftSnapshot()} disabled={draftSaving || draftLoading}>{draftSaving ? "保存中..." : "保存正文"}</button><button className="btn ghost tiny" onClick={() => void onRefreshDraftSnapshot(projectId, activeChapterId)} disabled={draftSaving || draftLoading}>拉取服务器版本</button><button className="btn primary tiny" onClick={() => onApplyAssistantToDraft("insert")}>插入助手回复</button><button className="btn ghost tiny" onClick={() => onApplyAssistantToDraft("replace")}>替换选中为助手回复</button></div><p className="draft-hint">{draftLoading ? "正在加载服务器正文..." : `已选 ${selectedDraftText.length} 字`}{latestAssistantReply ? " · 最近一条助手回复可写回正文" : " · 暂无助手回复可写回"}</p><div className="chapter-outline"><div className="panel-title sub"><h3>章节大纲</h3><small>拖拽排序 + 点击切章</small></div><ChapterOutlineList chapterOutlines={chapterOutlines} activeChapterId={activeChapterId} dragChapterId={dragChapterId} disabled={draftLoading || draftSaving} onDragStart={onOutlineDragStart} onDragEnd={onOutlineDragEnd} onReorder={onReorderByDrag} onSelect={onSwitchChapter} /></div><DraftRevisionList draftRevisions={draftRevisions} disabled={draftSaving || draftLoading} onRollbackDraftToVersion={onRollbackDraftToVersion} /></>}
     </section>
   );
 });

@@ -38,6 +38,20 @@ async def generate_ghost_text(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    normalized_mode = str(payload.mode or "continue").strip().lower()
+    if normalized_mode not in {"continue", "polish", "expand"}:
+        raise HTTPException(status_code=400, detail="unsupported ghost mode")
+
+    source_text = str(payload.text or "").strip()
+    prefix_text = str(payload.prefix_text or "").strip()
+    if normalized_mode == "continue":
+        if not prefix_text:
+            raise HTTPException(status_code=400, detail="prefix_text is required for continue mode")
+    else:
+        if not source_text:
+            raise HTTPException(status_code=400, detail="text is required for polish/expand mode")
+
     template = None
     if payload.prompt_template_id is not None:
         template = get_prompt_template(db, payload.project_id, payload.prompt_template_id)
@@ -200,24 +214,38 @@ async def generate_ghost_text(
     try:
         generation = await generate_chat(
             _build_ghost_user_input(
-                payload.prefix_text,
+                normalized_mode,
+                prefix_text,
+                source_text=source_text,
                 style_prefix=template_user_prompt_prefix,
                 outline_hint="\n".join(outline_hint_parts),
             ),
-            context=model_context,
+            context={
+                **model_context,
+                "runtime_options": {
+                    "thinking_enabled": False,
+                    "scene_beat_id": payload.scene_beat_id,
+                    "source": "ghost_text",
+                    "mode": normalized_mode,
+                },
+            },
             model_override=payload.model,
             thinking_enabled=False,
-            temperature_profile=payload.temperature_profile or "ghost",
+            temperature_profile=payload.temperature_profile or ("chat" if normalized_mode in {"polish", "expand"} else "ghost"),
             temperature_override=payload.temperature_override,
             runtime_config=runtime_model_profile,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"ghost generation failed: {exc}")
 
-    suggestion = _normalize_ghost_suggestion(generation.assistant_text)
+    suggestion = _normalize_ghost_suggestion(
+        generation.assistant_text,
+        max_length=5000 if normalized_mode in {"polish", "expand"} else 200,
+    )
     usage = {
         **(generation.usage or {}),
         "ghost_context_mode": "light",
+        "ghost_mode": normalized_mode,
         "style_guard": bool(payload.style_guard),
         "prompt_template_hit": bool(template is not None),
     }

@@ -117,6 +117,58 @@ class GhostTextEndpointTestCase(unittest.TestCase):
         prompt = str(mock_generate_chat.await_args_list[0].args[0])
         self.assertNotIn("实体锚定（严格遵守）", prompt)
         self.assertNotIn("<Entities>", prompt)
+    @patch("app.api.endpoints.chat_ghost_text.resolve_model_profile_runtime")
+    @patch("app.api.endpoints.chat_ghost_text.generate_chat", new_callable=AsyncMock)
+    def test_ghost_text_polish_mode_uses_text_payload(
+        self,
+        mock_generate_chat: AsyncMock,
+        mock_resolve_model_profile_runtime,
+    ) -> None:
+        mock_resolve_model_profile_runtime.return_value = None
+        mock_generate_chat.return_value = ChatGenerationResult(
+            assistant_text="润色后的文本\n第二行",
+            proposed_actions=[],
+            usage={"provider": "stub"},
+        )
+
+        response = self.client.post(
+            "/api/chat/ghost-text",
+            headers=self._auth_header(),
+            json={
+                "project_id": 1,
+                "mode": "polish",
+                "text": "原文段落",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload.get("suggestion"), "润色后的文本\n第二行")
+
+        prompt = str(mock_generate_chat.await_args_list[0].args[0])
+        self.assertIn("### Instruction", prompt)
+        self.assertIn("任务：对给定原文做润色", prompt)
+        self.assertIn("原文段落", prompt)
+
+    @patch("app.api.endpoints.chat_ghost_text.resolve_model_profile_runtime")
+    @patch("app.api.endpoints.chat_ghost_text.generate_chat", new_callable=AsyncMock)
+    def test_ghost_text_rejects_empty_text_for_expand_mode(
+        self,
+        mock_generate_chat: AsyncMock,
+        mock_resolve_model_profile_runtime,
+    ) -> None:
+        mock_resolve_model_profile_runtime.return_value = None
+
+        response = self.client.post(
+            "/api/chat/ghost-text",
+            headers=self._auth_header(),
+            json={
+                "project_id": 1,
+                "mode": "expand",
+                "text": "",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("text is required", str(response.json().get("detail", "")))
 
 
 if __name__ == "__main__":

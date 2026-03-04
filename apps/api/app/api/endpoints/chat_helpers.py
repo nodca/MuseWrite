@@ -245,14 +245,14 @@ def normalize_index_lifecycle_dead_letter_row(
 
 
 def build_ghost_user_input(
+    mode: str,
     prefix_text: str,
     *,
+    source_text: str = "",
     style_prefix: str = "",
     outline_hint: str = "",
 ) -> str:
-    compact_prefix = (prefix_text or "").strip()
-    if len(compact_prefix) > 1800:
-        compact_prefix = compact_prefix[-1800:]
+    normalized_mode = str(mode or "continue").strip().lower()
     style_note = ""
     style_hint = (style_prefix or "").strip()
     if style_hint:
@@ -261,15 +261,56 @@ def build_ghost_user_input(
     outline_text = (outline_hint or "").strip()
     if outline_text:
         outline_note = f"\n剧情节拍约束：\n{outline_text[:520]}"
+
+    if normalized_mode == "expand":
+        compact_source = (source_text or "").strip()
+        if len(compact_source) > 3000:
+            compact_source = compact_source[-3000:]
+        return (
+            "你是小说写作助手。请严格遵循下面的 Instruction，输出最终正文，不要解释。\n"
+            "### Instruction:\n"
+            "- 任务：对给定原文做扩写。\n"
+            "- 约束：保持原有人称、语气、叙事视角，不改变既有剧情事实、时间线、人设与因果逻辑。\n"
+            "- 禁止：新增设定说明、标题、列表、解释性语句。\n"
+            "### Output:\n"
+            "只输出扩写后的完整正文。"
+            f"{style_note}{outline_note}\n"
+            f"### Context:\n原文：\n{compact_source}"
+        )
+
+    if normalized_mode == "polish":
+        compact_source = (source_text or "").strip()
+        if len(compact_source) > 3000:
+            compact_source = compact_source[-3000:]
+        return (
+            "你是小说写作助手。请严格遵循下面的 Instruction，输出最终正文，不要解释。\n"
+            "### Instruction:\n"
+            "- 任务：对给定原文做润色。\n"
+            "- 约束：不改变剧情事实、时间线、人设与事件顺序。\n"
+            "- 目标：优化语言节奏、画面感与情绪表达。\n"
+            "- 禁止：新增事件、标题、列表、解释性语句。\n"
+            "### Output:\n"
+            "只输出润色后的完整正文。"
+            f"{style_note}{outline_note}\n"
+            f"### Context:\n原文：\n{compact_source}"
+        )
+
+    compact_prefix = (prefix_text or "").strip()
+    if len(compact_prefix) > 1800:
+        compact_prefix = compact_prefix[-1800:]
     return (
-        "你正在执行 Ghost Text 续写任务。请只输出“下一小段可直接接在正文后”的中文文本，"
-        "不要解释，不要使用引号，不要分点。\n"
-        "要求：20~80字，保持当前人称与语气，不引入越权设定。\n"
-        f"正文前缀：\n{compact_prefix}{style_note}{outline_note}"
+        "你是小说写作助手。请严格遵循下面的 Instruction，输出最终正文，不要解释。\n"
+        "### Instruction:\n"
+        "- 任务：生成可直接接在正文后的下一小段续写。\n"
+        "- 约束：20~80字，保持当前人称与语气，不引入越权设定。\n"
+        "- 禁止：引号包裹、分点、元叙事解释。\n"
+        "### Output:\n"
+        "只输出续写段落文本。\n"
+        f"### Context:\n正文前缀：\n{compact_prefix}{style_note}{outline_note}"
     )
 
 
-def normalize_ghost_suggestion(value: str) -> str:
+def normalize_ghost_suggestion(value: str, *, max_length: int = 200) -> str:
     text = (value or "").strip()
     if not text:
         return ""
@@ -277,9 +318,10 @@ def normalize_ghost_suggestion(value: str) -> str:
         text = text[1:-1].strip()
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.strip() for line in text.split("\n") if line.strip()]
-    merged = " ".join(lines)
-    if len(merged) > 200:
-        merged = merged[:200].rstrip()
+    merged = "\n".join(lines)
+    normalized_limit = int(max_length) if int(max_length) > 0 else 200
+    if len(merged) > normalized_limit:
+        merged = merged[:normalized_limit].rstrip()
     return merged
 
 

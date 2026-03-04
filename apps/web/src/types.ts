@@ -31,10 +31,12 @@ export interface ChatStreamRequest {
 
 export interface GhostTextRequest {
   project_id: number;
+  mode?: "continue" | "polish" | "expand";
   chapter_id?: number | null;
   scene_beat_id?: number | null;
   prompt_template_id?: number | null;
-  prefix_text: string;
+  prefix_text?: string;
+  text?: string;
   chapter_goal?: string | null;
   active_roles?: string[] | null;
   model: string | null;
@@ -46,21 +48,6 @@ export interface GhostTextRequest {
 
 export interface GhostTextResponse {
   suggestion: string;
-  usage: Record<string, unknown>;
-}
-
-export interface RewriteRequest {
-  project_id: number;
-  mode: "polish" | "expand";
-  text: string;
-  model: string | null;
-  temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;
-  temperature_override?: number | null;
-  model_profile_id?: string | null;
-}
-
-export interface RewriteResponse {
-  result: string;
   usage: Record<string, unknown>;
 }
 

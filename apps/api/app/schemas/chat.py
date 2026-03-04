@@ -29,10 +29,12 @@ class ChatStreamRequest(BaseModel):
 
 class GhostTextRequest(BaseModel):
     project_id: int
+    mode: Literal["continue", "polish", "expand"] = Field(default="continue")
     chapter_id: Optional[int] = Field(default=None, ge=1)
     scene_beat_id: Optional[int] = Field(default=None, ge=1)
     prompt_template_id: Optional[int] = Field(default=None, ge=1)
     prefix_text: str = Field(default="", max_length=8000)
+    text: str = Field(default="", max_length=12000)
     chapter_goal: Optional[str] = Field(default=None, max_length=320)
     active_roles: list[str] = Field(default_factory=list, max_length=16)
     model: Optional[str] = Field(default=None, max_length=128)

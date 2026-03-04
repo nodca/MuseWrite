@@ -957,11 +957,29 @@ textarea:focus {
   color: #9d4b10;
 }
 
-.draft-editor {
+.draft-editor-context {
+  position: relative;
+}
+
+.selection-context-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 146px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 8px 18px rgba(18, 26, 44, 0.2);
+}
+
+.selection-context-menu .btn {
+  display: inline-flex;
   width: 100%;
-  min-height: 280px;
-  max-height: 68vh;
-  background: var(--draft-editor-bg);
+  justify-content: flex-start;
+  align-items: center;
 }
 
 .draft-editor .ProseMirror {

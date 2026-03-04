@@ -16,8 +16,6 @@ import type {
   GraphTimelineSnapshot,
   GhostTextRequest,
   GhostTextResponse,
-  RewriteRequest,
-  RewriteResponse,
   ModelProfile,
   ModelProfileDeleteResult,
   ModelProfileUpsertPayload,
@@ -342,13 +340,6 @@ export async function streamChat(
 
 export function generateGhostText(payload: GhostTextRequest): Promise<GhostTextResponse> {
   return requestJson<GhostTextResponse>("/api/chat/ghost-text", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function rewriteText(payload: RewriteRequest): Promise<RewriteResponse> {
-  return requestJson<RewriteResponse>("/api/writing/rewrite", {
     method: "POST",
     body: JSON.stringify(payload),
   });

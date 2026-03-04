@@ -95,11 +95,22 @@ class WritingRewriteEndpointTestCase(unittest.TestCase):
         self.assertEqual(payload.get("result"), "润色后的正文")
 
         prompt = str(mock_generate_chat.await_args_list[0].args[0])
-        self.assertIn("润色", prompt)
-        self.assertIn("<正文>", prompt)
+        self.assertIn("### Instruction", prompt)
+        self.assertIn("任务：对给定原文做润色", prompt)
+        self.assertIn("原文", prompt)
         self.assertIn("原文段落", prompt)
         self.assertEqual(mock_generate_chat.await_args_list[0].kwargs.get("runtime_config"), runtime_profile)
         self.assertEqual(mock_generate_chat.await_args_list[0].kwargs.get("temperature_profile"), "chat")
+        self.assertEqual(
+            mock_generate_chat.await_args_list[0].kwargs.get("context", {})
+            .get("runtime_options", {})
+            .get("source"),
+            "rewrite_shim",
+        )
+        self.assertEqual(
+            response.headers.get("X-Deprecated-Endpoint"),
+            "/api/writing/rewrite",
+        )
 
     @patch("app.api.endpoints.writing.resolve_model_profile_runtime")
     @patch("app.api.endpoints.writing.generate_chat", new_callable=AsyncMock)
@@ -129,7 +140,7 @@ class WritingRewriteEndpointTestCase(unittest.TestCase):
         self.assertEqual(payload.get("result"), "扩写后的正文")
 
         prompt = str(mock_generate_chat.await_args_list[0].args[0])
-        self.assertIn("扩写", prompt)
+        self.assertIn("任务：对给定原文做扩写", prompt)
         self.assertIn("原文", prompt)
 
 
