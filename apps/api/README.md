@@ -202,6 +202,8 @@ SSE event types:
 - `done`
 - `error`
 
+Note: `evidence` is persisted per assistant message as `context_xray` and is returned by `GET /api/chat/sessions/{session_id}/messages`.
+
 `POST /api/chat/stream` supports POV sandbox fields:
 
 ```json

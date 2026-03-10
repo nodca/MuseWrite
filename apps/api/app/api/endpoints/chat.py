@@ -15,6 +15,7 @@ from app.services.chat_service import (
     create_session,
     resolve_model_profile_runtime,
     update_message_content,
+    update_message_provenance,
 )
 from app.services.context_compiler import compile_context_bundle
 from app.services.llm_provider import generate_chat, generate_tot_brainstorm
@@ -133,6 +134,7 @@ async def chat_stream(
             build_action_provenance_fn=_build_action_provenance,
             emit_chat_trace_fn=emit_chat_trace,
             update_message_content_fn=update_message_content,
+            update_message_provenance_fn=update_message_provenance,
         ),
         media_type="text/event-stream",
         headers={

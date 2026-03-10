@@ -26,7 +26,13 @@ class ChatMessage(SQLModel, table=True):
     role: str = Field(max_length=32, index=True)
     content: str = Field(default="")
     model: Optional[str] = Field(default=None, max_length=128)
+    provenance: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+    @property
+    def context_xray(self) -> dict[str, Any] | None:
+        raw = self.provenance.get("context_xray") if isinstance(self.provenance, dict) else None
+        return raw if isinstance(raw, dict) else None
 
 
 class ChatAction(SQLModel, table=True):

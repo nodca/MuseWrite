@@ -71,8 +71,17 @@ class ChatStreamEndpointTestCase(unittest.TestCase):
             model_context={"workspace_context": {}, "runtime_options": {}},
             evidence_event={
                 "type": "evidence",
-                "summary": {"dsl": 0, "graph": 0, "rag": 0},
-                "policy": {"resolver_order": ["DSL", "GRAPH", "RAG"]},
+                "summary": {"dsl": 1, "graph": 2, "rag": 0},
+                "policy": {
+                    "resolver_order": ["DSL", "GRAPH", "RAG"],
+                    "mode": "character",
+                    "anchor": "神剑",
+                },
+                "sources": {
+                    "dsl": [{"id": 101, "title": "神剑", "snippet": "神剑：上古遗物。"}],
+                    "graph": [{"id": 202, "title": "神剑", "fact": "神剑 宿于 剑冢"}],
+                    "rag": [],
+                },
             },
         )
 
@@ -162,6 +171,26 @@ class ChatStreamEndpointTestCase(unittest.TestCase):
             self.assertEqual(rows[0].content, "帮我续写一句话")
             self.assertEqual(rows[1].role, "assistant")
             self.assertEqual(rows[1].content, "你好，世界。这是一段稳定输出。")
+            provenance = getattr(rows[1], "provenance", None)
+            self.assertIsInstance(provenance, dict)
+            context_xray = provenance.get("context_xray") if isinstance(provenance, dict) else None
+            self.assertIsInstance(context_xray, dict)
+            if isinstance(context_xray, dict):
+                self.assertEqual(context_xray.get("version"), 1)
+                evidence = context_xray.get("evidence")
+                self.assertIsInstance(evidence, dict)
+                if isinstance(evidence, dict):
+                    self.assertEqual(evidence.get("type"), "evidence")
+                    self.assertEqual(
+                        evidence.get("summary"),
+                        {"dsl": 1, "graph": 2, "rag": 0},
+                    )
+                    policy = evidence.get("policy")
+                    self.assertIsInstance(policy, dict)
+                    if isinstance(policy, dict):
+                        self.assertEqual(policy.get("resolver_order"), ["DSL", "GRAPH", "RAG"])
+                        self.assertEqual(policy.get("mode"), "character")
+                        self.assertEqual(policy.get("anchor"), "神剑")
 
     @patch("app.api.endpoints.chat.emit_chat_trace")
     @patch("app.api.endpoints.chat.update_message_content")
@@ -333,6 +362,75 @@ class ChatStreamEndpointTestCase(unittest.TestCase):
             ).all()
             self.assertGreaterEqual(len(logs), 1)
             self.assertEqual(logs[0].event_type, "proposed")
+
+    @patch("app.api.endpoints.chat.emit_chat_trace")
+    @patch("app.api.endpoints.chat.update_message_content")
+    @patch("app.api.endpoints.chat.resolve_model_profile_runtime")
+    @patch("app.api.endpoints.chat.generate_chat")
+    @patch("app.api.endpoints.chat.compile_context_bundle")
+    def test_chat_stream_attaches_graph_blast_radius_preview_to_proposed_action(
+        self,
+        mock_compile_context_bundle,
+        mock_generate_chat,
+        mock_resolve_model_profile_runtime,
+        mock_update_message_content,
+        _mock_emit_chat_trace,
+    ) -> None:
+        mock_resolve_model_profile_runtime.return_value = None
+        mock_update_message_content.side_effect = self._update_message_content_local
+        mock_compile_context_bundle.return_value = self._mock_compiled_bundle()
+        mock_generate_chat.return_value = ChatGenerationResult(
+            assistant_text="我建议补一张人物卡。",
+            proposed_actions=[
+                {
+                    "action_type": "card.create",
+                    "payload": {
+                        "title": "沈夜",
+                        "content": {
+                            "ally": "白璃",
+                        },
+                    },
+                }
+            ],
+            usage={"provider": "stub"},
+        )
+
+        response = self.client.post(
+            "/api/chat/stream",
+            headers=self._auth_header(),
+            json={"project_id": 1, "content": "补一张人物关系卡"},
+        )
+        self.assertEqual(response.status_code, 200)
+        events = self._parse_sse_events(response.text)
+        meta_event = next(item for item in events if item.get("type") == "meta")
+        proposed_ids = meta_event.get("proposed_action_ids")
+        self.assertTrue(isinstance(proposed_ids, list))
+        self.assertEqual(len(proposed_ids), 1)
+        created_action_id = int(proposed_ids[0])
+
+        with Session(self.engine) as db:
+            action = db.get(ChatAction, created_action_id)
+            self.assertIsNotNone(action)
+            payload = action.payload if action is not None and isinstance(action.payload, dict) else {}
+            blast_radius = payload.get("_graph_blast_radius")
+            self.assertIsInstance(blast_radius, dict)
+            if isinstance(blast_radius, dict):
+                self.assertEqual(blast_radius.get("source"), "rule_preview")
+                nodes = blast_radius.get("nodes")
+                edges = blast_radius.get("edges")
+                summary = blast_radius.get("summary")
+                self.assertIsInstance(nodes, list)
+                self.assertIsInstance(edges, list)
+                self.assertIsInstance(summary, dict)
+                node_labels = {str(item.get("label") or "") for item in nodes if isinstance(item, dict)}
+                self.assertTrue({"沈夜", "白璃"}.issubset(node_labels))
+                self.assertEqual(len(edges), 1)
+                edge = edges[0] if edges else {}
+                self.assertEqual(edge.get("source"), "沈夜")
+                self.assertEqual(edge.get("target"), "白璃")
+                self.assertEqual(edge.get("relation"), "ALLY_OF")
+                edge_summary = summary.get("edges") if isinstance(summary, dict) else {}
+                self.assertEqual(edge_summary.get("add"), 1)
 
     @patch("app.api.endpoints.chat.emit_chat_trace")
     @patch("app.api.endpoints.chat.update_message_content")

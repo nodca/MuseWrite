@@ -47,6 +47,29 @@ class GhostTextResponse(BaseModel):
     usage: dict
 
 
+class GhostTextStreamRequest(BaseModel):
+    project_id: int
+    chapter_id: Optional[int] = Field(default=None, ge=1)
+    scene_beat_id: Optional[int] = Field(default=None, ge=1)
+    prompt_template_id: Optional[int] = Field(default=None, ge=1)
+    prefix: str = Field(default="", max_length=12000)
+    suffix: str = Field(default="", max_length=4000)
+    chapter_goal: Optional[str] = Field(default=None, max_length=320)
+    active_roles: list[str] = Field(default_factory=list, max_length=16)
+    model: Optional[str] = Field(default=None, max_length=128)
+    style_guard: bool = True
+    temperature_profile: Optional[str] = Field(default=None, max_length=32)
+    temperature_override: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    model_profile_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class GhostTextStreamEvent(BaseModel):
+    type: Literal["start", "delta", "done", "error"]
+    text: str = ""
+    usage: dict = Field(default_factory=dict)
+    message: Optional[str] = None
+
+
 class RewriteRequest(BaseModel):
     project_id: int
     mode: Literal["polish", "expand"] = Field(default="polish")
@@ -68,6 +91,7 @@ class ChatMessageRead(BaseModel):
     role: str
     content: str
     model: Optional[str]
+    context_xray: dict | None = None
     created_at: datetime
 
 

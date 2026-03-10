@@ -9,7 +9,7 @@ from collections import deque
 import time
 from uuid import uuid4
 
-import httpx
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.core.config import settings
@@ -41,10 +41,12 @@ from app.services.graph_mutation_registry import (
 from app.services.index_lifecycle_queue import enqueue_index_lifecycle_job
 from app.services.entity_merge_queue import enqueue_entity_merge_scan_job
 from app.services.index_lifecycle_service import process_index_lifecycle_rebuild
+from app.services.llm_provider import generate_structured_sync
 from app.services.retrieval_adapters import (
     delete_neo4j_graph_facts,
     delete_neo4j_graph_facts_by_sources,
     fetch_neo4j_entity_profiles,
+    fetch_neo4j_graph_timeline_snapshot,
     fetch_lightrag_graph_candidates,
     make_graph_candidate,
     merge_graph_candidates,
@@ -64,6 +66,17 @@ _MODEL_PROFILE_ACTIVE_KEY = "llm.profile.active"
 _MODEL_PROFILE_ALLOWED_PROVIDERS: frozenset[str] = frozenset(
     {"openai_compatible", "deepseek", "claude", "gemini"}
 )
+
+
+class GraphCorefRewriteOutput(BaseModel):
+    rewritten_text: str = Field(default="", max_length=4000)
+    applied: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class VolumeMemoryConsolidationOutput(BaseModel):
+    facts: list[str] = Field(default_factory=list, max_length=32)
+    notes: str = Field(default="", max_length=400)
 
 
 def _utc_now() -> datetime:
@@ -165,8 +178,15 @@ def append_message(
     role: str,
     content: str,
     model: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> ChatMessage:
-    msg = ChatMessage(session_id=session_id, role=role, content=content, model=model)
+    msg = ChatMessage(
+        session_id=session_id,
+        role=role,
+        content=content,
+        model=model,
+        provenance=provenance or {},
+    )
     db.add(msg)
 
     session = db.get(ChatSession, session_id)
@@ -191,6 +211,32 @@ def update_message_content(
         if not msg:
             return
         msg.content = content
+        session = target_db.get(ChatSession, msg.session_id)
+        if session:
+            session.updated_at = _utc_now()
+            target_db.add(session)
+        target_db.add(msg)
+        target_db.commit()
+
+    if db is not None:
+        _write(db)
+        return
+
+    with Session(engine) as managed_db:
+        _write(managed_db)
+
+
+def update_message_provenance(
+    message_id: int,
+    provenance: dict[str, Any],
+    *,
+    db: Session | None = None,
+) -> None:
+    def _write(target_db: Session) -> None:
+        msg = target_db.get(ChatMessage, message_id)
+        if not msg:
+            return
+        msg.provenance = provenance if isinstance(provenance, dict) else {}
         session = target_db.get(ChatSession, msg.session_id)
         if session:
             session.updated_at = _utc_now()
@@ -1137,26 +1183,13 @@ def _build_overlap_chunks(
     return chunks or [content]
 
 
-def _extract_json_object(raw: str) -> dict[str, Any] | None:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    match = re.search(r"\{[\s\S]*\}", text)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        return None
-    return None
+def _build_lightrag_runtime_config(model: str, base_url: str, api_key: str) -> dict[str, str]:
+    return {
+        "provider": "openai_compatible",
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+    }
 
 
 def _rewrite_chunk_with_llm_coref(
@@ -1178,40 +1211,26 @@ def _rewrite_chunk_with_llm_coref(
         }
 
     model = str(settings.graph_coref_llm_model or lightrag_model).strip()
-    endpoint = lightrag_base_url.rstrip("/") + "/chat/completions"
     system_prompt = (
         "你是小说图谱抽取前的文本预处理器。"
         "任务是把代词（他/她/它/那家伙等）在有上下文依据时还原为明确实体。"
         "必须保持事实不变，不新增事件，不润色文风。"
-        "若不确定则保持原文。只输出 JSON。"
+        "若不确定则保持原文。只输出符合 schema 的 JSON。"
     )
     payload = {
         "anchor": anchor_canonical,
         "context_summary": context_summary,
         "chunk_text": chunk_text,
-        "output_schema": {
-            "rewritten_text": "string",
-            "applied": "boolean",
-            "confidence": "number(0-1)",
-        },
     }
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {lightrag_api_key}"}
-    timeout = httpx.Timeout(float(settings.graph_coref_llm_timeout_seconds))
     try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        structured = generate_structured_sync(
+            json.dumps(payload, ensure_ascii=False),
+            output_model=GraphCorefRewriteOutput,
+            schema_name="graph_coref_rewrite_output",
+            context={"system": system_prompt, "raw_prompt": True},
+            runtime_config=_build_lightrag_runtime_config(model, lightrag_base_url, lightrag_api_key),
+            temperature_override=0.0,
+        )
     except Exception as exc:
         return chunk_text, {
             "enabled": True,
@@ -1221,8 +1240,7 @@ def _rewrite_chunk_with_llm_coref(
             "model": model,
         }
 
-    content = str(data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-    parsed = _extract_json_object(content)
+    parsed = structured.parsed
     if not parsed:
         return chunk_text, {
             "enabled": True,
@@ -1231,10 +1249,9 @@ def _rewrite_chunk_with_llm_coref(
             "model": model,
         }
 
-    rewritten = str(parsed.get("rewritten_text") or "").strip()
-    applied = bool(parsed.get("applied")) and bool(rewritten) and rewritten != chunk_text
-    confidence_raw = parsed.get("confidence")
-    confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else 0.0
+    rewritten = str(getattr(parsed, "rewritten_text", "") or "").strip()
+    applied = bool(getattr(parsed, "applied", False)) and bool(rewritten) and rewritten != chunk_text
+    confidence = float(getattr(parsed, "confidence", 0.0) or 0.0)
     if confidence < 0.65:
         return chunk_text, {
             "enabled": True,
@@ -1574,6 +1591,310 @@ def _build_graph_extraction_text(action_type: str, payload: dict, project_id: in
         return text, source_entity or None, _extract_rule_graph_candidates(source_entity, value_obj)
 
     return "", None, []
+
+
+def _graph_preview_edge_key(source: str, relation: str, target: str) -> str:
+    source_norm = _normalize_graph_entity_token(source)
+    target_norm = _normalize_graph_entity_token(target)
+    relation_norm = str(relation or "").strip().upper()
+    if not source_norm or not target_norm or not relation_norm:
+        return ""
+    return f"{source_norm}|{relation_norm}|{target_norm}"
+
+
+def _merge_graph_preview_node(
+    node_map: dict[str, dict[str, Any]],
+    *,
+    label: str,
+    change: str,
+    role: str,
+    current_labels: dict[str, str],
+) -> None:
+    normalized = _normalize_graph_entity_token(label)
+    if not normalized:
+        return
+
+    current_label = current_labels.get(normalized, "")
+    display_label = str(label or current_label or normalized).strip() or normalized
+    next_item = {
+        "id": display_label,
+        "label": display_label,
+        "change": change,
+        "role": role,
+        "in_current_graph": bool(current_label),
+    }
+    existing = node_map.get(normalized)
+    if existing is None:
+        node_map[normalized] = next_item
+        return
+
+    severity = {"delete": 4, "update": 3, "create": 2, "touch": 1}
+    existing_change = str(existing.get("change") or "touch")
+    next_change = str(change or "touch")
+    should_replace = severity.get(next_change, 0) > severity.get(existing_change, 0)
+    if str(existing.get("role") or "") != "anchor" and role == "anchor":
+        should_replace = True
+    if should_replace:
+        node_map[normalized] = next_item
+        return
+
+    existing["in_current_graph"] = bool(existing.get("in_current_graph")) or bool(current_label)
+    if not existing.get("label") and display_label:
+        existing["label"] = display_label
+        existing["id"] = display_label
+
+
+def build_action_blast_radius_preview(
+    db: Session,
+    *,
+    project_id: int,
+    action_type: str,
+    payload: dict[str, Any],
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    preview = {
+        "source": "none",
+        "action_type": str(action_type or ""),
+        "chapter_index": None,
+        "nodes": [],
+        "edges": [],
+        "summary": {
+            "nodes": {"create": 0, "update": 0, "delete": 0, "touch": 0},
+            "edges": {"add": 0, "update": 0, "delete": 0},
+        },
+        "notes": [],
+    }
+    if not isinstance(payload, dict):
+        preview["notes"].append("payload 无效，无法推导图谱影响。")
+        return preview
+
+    action_payload = copy.deepcopy(payload)
+    provenance_payload = provenance if isinstance(provenance, dict) else {}
+    graph_current_chapter = 0
+    try:
+        graph_current_chapter = int(provenance_payload.get("current_chapter_index") or 0)
+    except Exception:
+        graph_current_chapter = 0
+    if graph_current_chapter > 0:
+        action_payload["_graph_current_chapter"] = graph_current_chapter
+        preview["chapter_index"] = graph_current_chapter
+
+    normalized_action_type = str(action_type or "").strip()
+    if normalized_action_type == "setting.upsert":
+        key = _setting_key_from_payload(action_payload)
+        graph_anchor = key.replace("设定", "").strip() or key
+        action_payload["_graph_anchor"] = graph_anchor
+    elif normalized_action_type == "card.create":
+        title = str(action_payload.get("title") or "未命名卡片").strip() or "未命名卡片"
+        action_payload["_graph_anchor"] = title
+    elif normalized_action_type == "card.update":
+        card_id = action_payload.get("card_id")
+        card = db.get(StoryCard, card_id) if isinstance(card_id, int) else None
+        current_title = str(card.title or "").strip() if card else ""
+        next_title = str(action_payload.get("title") or current_title).strip()
+        if next_title:
+            action_payload["_graph_anchor"] = next_title
+        if current_title:
+            action_payload["_graph_anchor_before"] = current_title
+    elif normalized_action_type == "setting.delete":
+        preview["notes"].append("此动作不会直接改写图谱关系，仅影响设定与索引生命周期。")
+        return preview
+    elif is_entity_merge_action_type(normalized_action_type):
+        target_card_id = action_payload.get("target_card_id")
+        if not isinstance(target_card_id, int):
+            target_card_id = action_payload.get("canonical_card_id")
+        if not isinstance(target_card_id, int):
+            target_card_id = action_payload.get("card_id")
+        card = db.get(StoryCard, target_card_id) if isinstance(target_card_id, int) else None
+        if card:
+            node_label = str(card.title or "").strip() or f"card-{target_card_id}"
+            current_labels = {_normalize_graph_entity_token(node_label): node_label}
+            node_map: dict[str, dict[str, Any]] = {}
+            _merge_graph_preview_node(
+                node_map,
+                label=node_label,
+                change="update",
+                role="anchor",
+                current_labels=current_labels,
+            )
+            preview["source"] = "alias_preview"
+            preview["nodes"] = list(node_map.values())
+            preview["summary"]["nodes"]["update"] = len(preview["nodes"])
+        preview["notes"].append("此动作只改 aliases 归一化，不会立即增删图谱边。")
+        return preview
+
+    text, anchor, rule_candidates = _build_graph_extraction_text(normalized_action_type, action_payload, project_id)
+    projection_sources: list[str] = []
+    for key in ("_graph_anchor", "_graph_anchor_before"):
+        value = str(action_payload.get(key) or "").strip()
+        if value and value not in projection_sources:
+            projection_sources.append(value)
+    if anchor and anchor not in projection_sources:
+        projection_sources.append(anchor)
+
+    current_snapshot = fetch_neo4j_graph_timeline_snapshot(
+        project_id,
+        current_chapter=graph_current_chapter if graph_current_chapter > 0 else None,
+        limit=260,
+    )
+    current_nodes_raw = current_snapshot.get("nodes") if isinstance(current_snapshot, dict) else []
+    current_edges_raw = current_snapshot.get("edges") if isinstance(current_snapshot, dict) else []
+    current_labels: dict[str, str] = {}
+    if isinstance(current_nodes_raw, list):
+        for item in current_nodes_raw:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("id") or "").strip()
+            normalized = _normalize_graph_entity_token(label)
+            if normalized and normalized not in current_labels:
+                current_labels[normalized] = label
+
+    alias_map = _build_project_entity_alias_map(db, project_id)
+    resolved_candidates, _ = _resolve_entity_aliases_for_candidates(
+        merge_graph_candidates(rule_candidates, [], limit=24),
+        alias_map,
+    )
+
+    projection_source_norms = {
+        _normalize_graph_entity_token(item)
+        for item in projection_sources
+        if _normalize_graph_entity_token(item)
+    }
+    existing_edges: dict[str, dict[str, Any]] = {}
+    if isinstance(current_edges_raw, list):
+        for item in current_edges_raw:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "").strip()
+            target = str(item.get("target") or "").strip()
+            relation = str(item.get("relation") or "").strip().upper()
+            source_norm = _normalize_graph_entity_token(source)
+            if projection_source_norms and source_norm not in projection_source_norms:
+                continue
+            edge_key = _graph_preview_edge_key(source, relation, target)
+            if not edge_key or edge_key in existing_edges:
+                continue
+            existing_edges[edge_key] = {
+                "key": edge_key,
+                "source": source,
+                "target": target,
+                "relation": relation,
+                "change": "delete",
+                "in_current_graph": True,
+            }
+
+    candidate_edges: dict[str, dict[str, Any]] = {}
+    for item in resolved_candidates:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source_entity") or "").strip()
+        target = str(item.get("target_entity") or "").strip()
+        relation = str(item.get("relation") or "").strip().upper()
+        edge_key = _graph_preview_edge_key(source, relation, target)
+        if not edge_key or edge_key in candidate_edges:
+            continue
+        candidate_edges[edge_key] = {
+            "key": edge_key,
+            "source": source,
+            "target": target,
+            "relation": relation,
+            "change": "add",
+            "in_current_graph": edge_key in existing_edges,
+        }
+
+    node_map: dict[str, dict[str, Any]] = {}
+    anchor_norms = {
+        _normalize_graph_entity_token(item)
+        for item in projection_sources
+        if _normalize_graph_entity_token(item)
+    }
+    for item in projection_sources:
+        normalized = _normalize_graph_entity_token(item)
+        if not normalized:
+            continue
+        current_exists = normalized in current_labels
+        anchor_change = (
+            "create"
+            if normalized_action_type == "card.create" and not current_exists
+            else "update"
+        )
+        _merge_graph_preview_node(
+            node_map,
+            label=item,
+            change=anchor_change,
+            role="anchor",
+            current_labels=current_labels,
+        )
+
+    edge_items: list[dict[str, Any]] = []
+    for edge_key in sorted(set(existing_edges) | set(candidate_edges)):
+        edge_item = candidate_edges.get(edge_key) or existing_edges.get(edge_key) or {}
+        if edge_key in existing_edges and edge_key in candidate_edges:
+            next_edge = {**candidate_edges[edge_key], "change": "update", "in_current_graph": True}
+        elif edge_key in candidate_edges:
+            next_edge = candidate_edges[edge_key]
+        else:
+            next_edge = existing_edges[edge_key]
+        edge_items.append(next_edge)
+
+        source_norm = _normalize_graph_entity_token(str(edge_item.get("source") or ""))
+        target_norm = _normalize_graph_entity_token(str(edge_item.get("target") or ""))
+        source_change = "update" if source_norm in anchor_norms else "touch"
+        target_current_exists = target_norm in current_labels
+        if next_edge["change"] == "add":
+            target_change = "touch" if target_current_exists else "create"
+        elif next_edge["change"] == "update":
+            target_change = "touch" if target_current_exists else "create"
+        else:
+            target_change = "touch"
+        _merge_graph_preview_node(
+            node_map,
+            label=str(edge_item.get("source") or ""),
+            change=source_change,
+            role="anchor" if source_norm in anchor_norms else "related",
+            current_labels=current_labels,
+        )
+        _merge_graph_preview_node(
+            node_map,
+            label=str(edge_item.get("target") or ""),
+            change=target_change,
+            role="related",
+            current_labels=current_labels,
+        )
+
+    preview["source"] = "rule_preview" if text or resolved_candidates or projection_sources else "none"
+    preview["nodes"] = sorted(
+        node_map.values(),
+        key=lambda item: (
+            0 if str(item.get("role") or "") == "anchor" else 1,
+            0
+            if str(item.get("change") or "") == "delete"
+            else (
+                1
+                if str(item.get("change") or "") == "update"
+                else (2 if str(item.get("change") or "") == "create" else 3)
+            ),
+            str(item.get("label") or ""),
+        ),
+    )
+    preview["edges"] = edge_items
+
+    node_summary = {"create": 0, "update": 0, "delete": 0, "touch": 0}
+    for item in preview["nodes"]:
+        change = str(item.get("change") or "touch")
+        if change in node_summary:
+            node_summary[change] += 1
+    edge_summary = {"add": 0, "update": 0, "delete": 0}
+    for item in preview["edges"]:
+        change = str(item.get("change") or "add")
+        if change in edge_summary:
+            edge_summary[change] += 1
+    preview["summary"] = {"nodes": node_summary, "edges": edge_summary}
+    if not preview["edges"]:
+        preview["notes"].append("当前动作未推导出可视化关系边，仅影响锚点节点。")
+    if not current_labels:
+        preview["notes"].append("当前章节未加载到已确认图谱，绿色项为待写入预览。")
+    return preview
 
 
 def _sync_graph_for_action(
@@ -2949,7 +3270,6 @@ def _call_volume_memory_consolidation_llm(
     if not (model and base_url and api_key):
         return _fallback_consolidated_facts(chapters, max_facts=max_facts), "fallback_missing_lightrag_llm"
 
-    endpoint = base_url.rstrip("/") + "/chat/completions"
     chapter_payload = [
         {
             "chapter_index": int(getattr(item, "chapter_index", 0) or 0),
@@ -2958,49 +3278,37 @@ def _call_volume_memory_consolidation_llm(
         }
         for item in chapters
     ]
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是小说记忆固化器。请把一整卷内容提炼为高密度、可检索、可验证的事实。"
-                    "输出 JSON，格式: {\"facts\":[\"...\"],\"notes\":\"...\"}。"
-                    "facts 必须是陈述句，禁止编造。"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "volume_title": volume_title,
-                        "volume_outline": volume_outline[:1000],
-                        "chapters": chapter_payload,
-                        "max_facts": max_facts,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        timeout = httpx.Timeout(float(settings.memory_consolidation_llm_timeout_seconds))
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
+        structured = generate_structured_sync(
+            json.dumps(
+                {
+                    "volume_title": volume_title,
+                    "volume_outline": volume_outline[:1000],
+                    "chapters": chapter_payload,
+                    "max_facts": max_facts,
+                },
+                ensure_ascii=False,
+            ),
+            output_model=VolumeMemoryConsolidationOutput,
+            schema_name="volume_memory_consolidation_output",
+            context={
+                "system": (
+                    "你是小说记忆固化器。请把一整卷内容提炼为高密度、可检索、可验证的事实。"
+                    "facts 必须是陈述句，禁止编造。"
+                    "只输出符合 schema 的 JSON。"
+                ),
+                "raw_prompt": True,
+            },
+            runtime_config=_build_lightrag_runtime_config(model, base_url, api_key),
+            temperature_override=0.0,
+        )
     except Exception:
         return _fallback_consolidated_facts(chapters, max_facts=max_facts), "fallback_llm_error"
 
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-    parsed = _extract_json_object(content)
+    parsed = structured.parsed
     if not parsed:
         return _fallback_consolidated_facts(chapters, max_facts=max_facts), "fallback_invalid_json"
-    raw_facts = parsed.get("facts")
+    raw_facts = getattr(parsed, "facts", [])
     if not isinstance(raw_facts, list):
         return _fallback_consolidated_facts(chapters, max_facts=max_facts), "fallback_missing_facts"
     facts: list[str] = []

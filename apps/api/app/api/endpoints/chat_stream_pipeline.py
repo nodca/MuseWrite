@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from app.core.config import settings
@@ -23,6 +24,7 @@ async def stream_chat_events(
     build_action_provenance_fn: Callable[[dict[str, Any] | None], dict[str, Any]],
     emit_chat_trace_fn: Callable[[ChatTracePayload], None],
     update_message_content_fn: Callable[..., Any],
+    update_message_provenance_fn: Callable[..., Any],
 ) -> AsyncGenerator[str, None]:
     chunks: list[str] = []
     proposed_action_ids: list[int] = []
@@ -284,6 +286,18 @@ async def stream_chat_events(
             "assistant_message_id": assistant_msg.id,
             "proposed_action_ids": proposed_action_ids,
         }
+    )
+    update_message_provenance_fn(
+        assistant_msg.id,
+        {
+            "context_xray": {
+                "version": 1,
+                "evidence": deepcopy(compiled_bundle.evidence_event)
+                if isinstance(compiled_bundle.evidence_event, dict)
+                else None,
+            }
+        },
+        db=db,
     )
     yield sse_event(compiled_bundle.evidence_event)
 

@@ -10,7 +10,7 @@ from sqlmodel import SQLModel, Session, create_engine
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import get_session
-from app.models.chat import ChatAction, ChatSession
+from app.models.chat import ChatAction, ChatMessage, ChatSession
 
 
 class ChatEndpointEdgesTestCase(unittest.TestCase):
@@ -92,6 +92,26 @@ class ChatEndpointEdgesTestCase(unittest.TestCase):
             db.refresh(action)
             return int(action.id or 0)
 
+    def _create_message(
+        self,
+        *,
+        session_id: int,
+        role: str,
+        content: str,
+        provenance: dict | None = None,
+    ) -> int:
+        with Session(self.engine) as db:
+            message = ChatMessage(
+                session_id=session_id,
+                role=role,
+                content=content,
+                provenance=provenance or {},
+            )
+            db.add(message)
+            db.commit()
+            db.refresh(message)
+            return int(message.id or 0)
+
     @staticmethod
     def _dead_letter_fixture_rows() -> list[object]:
         return [
@@ -160,6 +180,50 @@ class ChatEndpointEdgesTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json().get("detail"), "only applied action can be undone")
+
+    def test_session_messages_returns_context_xray_payload(self) -> None:
+        session_id = self._create_session()
+        self._create_message(session_id=session_id, role="user", content="谁拿到了神剑？")
+        self._create_message(
+            session_id=session_id,
+            role="assistant",
+            content="李承渊拿到了神剑。",
+            provenance={
+                "context_xray": {
+                    "version": 1,
+                    "evidence": {
+                        "type": "evidence",
+                        "summary": {"dsl": 1, "graph": 0, "rag": 0},
+                        "policy": {"resolver_order": ["DSL", "GRAPH", "RAG"]},
+                        "sources": {
+                            "dsl": [{"title": "神剑", "snippet": "神剑：认主后才会觉醒。"}],
+                            "graph": [],
+                            "rag": [],
+                        },
+                    },
+                }
+            },
+        )
+
+        response = self.client.get(
+            f"/api/chat/sessions/{session_id}/messages",
+            headers=self._auth_header("human-token"),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload), 2)
+        self.assertEqual(payload[1].get("role"), "assistant")
+        self.assertIn("context_xray", payload[1])
+        context_xray = payload[1].get("context_xray")
+        self.assertIsInstance(context_xray, dict)
+        if isinstance(context_xray, dict):
+            self.assertEqual(context_xray.get("version"), 1)
+            self.assertIn("evidence", context_xray)
+            evidence = context_xray.get("evidence")
+            self.assertIsInstance(evidence, dict)
+            if isinstance(evidence, dict):
+                self.assertEqual(evidence.get("summary"), {"dsl": 1, "graph": 0, "rag": 0})
 
     def test_apply_entity_merge_requires_manual_confirmed(self) -> None:
         action_id = self._create_action(action_type="entity.merge.alias")
