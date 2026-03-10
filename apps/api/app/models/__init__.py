@@ -7,7 +7,13 @@ from app.models.chat import (
     PendingGraphMutation,
     ProjectMutationVersion,
 )
-from app.models.simulation import SimulationSession, SimulationTurn
+from app.models.simulation import (
+    SimulationDecisionTrace,
+    SimulationEvent,
+    SimulationSession,
+    SimulationSessionState,
+    SimulationTurn,
+)
 from app.models.content import (
     ChapterSceneBeat,
     ForeshadowingCard,
@@ -38,5 +44,8 @@ __all__ = [
     "PromptTemplate",
     "PromptTemplateRevision",
     "SimulationSession",
+    "SimulationSessionState",
+    "SimulationEvent",
+    "SimulationDecisionTrace",
     "SimulationTurn",
 ]
