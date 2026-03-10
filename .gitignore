@@ -30,3 +30,4 @@ apps/api/models/
 
 # Claude local workspace artifacts
 .claude/worktrees/
+.worktrees/
