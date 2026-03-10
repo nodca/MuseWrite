@@ -51,6 +51,7 @@ from app.services.index_lifecycle_queue import (
 )
 from app.services.index_lifecycle_service import process_index_lifecycle_rebuild
 from app.services.pg_job_queue import cleanup_async_jobs
+from app.services.retrieval_adapters import prewarm_neo4j_ppr_projection
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -237,18 +238,54 @@ def _process_graph_job(job: dict[str, Any]) -> tuple[str, int]:
                 )
                 return "drop_done", attempt
 
-            process_graph_sync_for_action(
+            payload = (
+                job.get("payload") if isinstance(job.get("payload"), dict) else (action.payload or {})
+            )
+            graph_sync, fact_keys = process_graph_sync_for_action(
                 db=db,
                 action=action,
                 project_id=project_id,
                 action_type=str(job.get("action_type") or action.action_type),
-                payload=job.get("payload") if isinstance(job.get("payload"), dict) else (action.payload or {}),
+                payload=payload,
                 operator_id=str(job.get("operator_id") or action.operator_id),
                 mutation_id=mutation_id,
                 expected_version=expected_version,
                 job_idempotency_key=job_idempotency_key,
                 sync_mode="worker_async",
             )
+            if fact_keys and str((graph_sync or {}).get("status") or "") == "synced":
+                current_chapter: int | None = None
+                if isinstance(payload, dict):
+                    raw_chapter = payload.get("_graph_current_chapter")
+                    if raw_chapter is None:
+                        raw_chapter = payload.get("current_chapter_index")
+                    try:
+                        current_chapter = int(raw_chapter)
+                    except Exception:
+                        current_chapter = None
+                    if current_chapter is not None and current_chapter <= 0:
+                        current_chapter = None
+                try:
+                    prewarm_result = prewarm_neo4j_ppr_projection(
+                        project_id,
+                        current_chapter=current_chapter,
+                        reason="graph_sync_worker",
+                    )
+                    if isinstance(prewarm_result, dict) and str(prewarm_result.get("status") or "") == "error":
+                        _LOGGER.warning(
+                            "worker_graph_ppr_prewarm_failed project_id=%s reason=%s message=%s",
+                            project_id,
+                            prewarm_result.get("reason"),
+                            prewarm_result.get("message"),
+                        )
+                except Exception as exc:
+                    err = str(exc)
+                    _LOGGER.warning(
+                        "worker_graph_ppr_prewarm_failed project_id=%s err=%s error=%s",
+                        project_id,
+                        err,
+                        err,
+                    )
             return "ok", attempt
 
 

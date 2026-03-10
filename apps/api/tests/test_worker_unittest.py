@@ -213,6 +213,27 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(payload.get("reason"), "already_synced")
         self.assertEqual(payload.get("mutation_id"), "m-1")
 
+    def test_process_graph_job_triggers_projection_prewarm_on_sync(self) -> None:
+        action_id = self._create_action(project_id=13, status="applied")
+        job = {
+            "action_id": action_id,
+            "project_id": 13,
+            "attempt": 1,
+            "payload": {"_graph_current_chapter": 12},
+        }
+
+        with patch(
+            "app.worker.process_graph_sync_for_action",
+            return_value=({"status": "synced"}, ["fact-1"]),
+        ), patch("app.worker.prewarm_neo4j_ppr_projection") as mock_prewarm:
+            result, attempt = worker_module._process_graph_job(job)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempt, 1)
+        mock_prewarm.assert_called_once()
+        self.assertEqual(mock_prewarm.call_args.args[0], 13)
+        self.assertEqual(mock_prewarm.call_args.kwargs.get("current_chapter"), 12)
+
     def test_process_graph_job_drops_when_pending_mutation_canceled(self) -> None:
         mutation_id = "m-canceled-1"
         action_id = self._create_action(
