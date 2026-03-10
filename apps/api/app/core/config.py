@@ -448,6 +448,9 @@ class Settings:
     neo4j_username = os.getenv("NEO4J_USERNAME", "")
     neo4j_password = os.getenv("NEO4J_PASSWORD", "")
     neo4j_database = os.getenv("NEO4J_DATABASE", "neo4j")
+    neo4j_gds_required = _parse_bool(os.getenv("NEO4J_GDS_REQUIRED"), True)
+    neo4j_gds_min_version = os.getenv("NEO4J_GDS_MIN_VERSION", "")
+    neo4j_gds_graph_name_prefix = os.getenv("NEO4J_GDS_GRAPH_NAME_PREFIX", "novel_ppr")
 
     graph_sync_async_enabled = _parse_bool(os.getenv("GRAPH_SYNC_ASYNC_ENABLED"), True)
     graph_sync_queue_name = os.getenv("GRAPH_SYNC_QUEUE_NAME", "graph_sync_jobs")

@@ -115,6 +115,13 @@ _RELATION_ALIAS_MAP = {
     "member_of": "BELONGS_TO",
 }
 
+# Use an explicit sentinel instead of NULL so Neo4j keeps the property key
+# and Cypher/GDS temporal filters do not emit missing-property warnings.
+_OPEN_ENDED_CHAPTER = 2147483647
+_GDS_PROJECTION_CATALOG_LABEL = "GdsProjectionCatalog"
+_GDS_PROJECTION_STATE_LABEL = "GdsProjectionState"
+_GDS_PROJECTION_KIND_PPR = "ppr"
+
 
 def _normalize_entity_name(value: str) -> tuple[str, str]:
     display = str(value or "").strip()
@@ -132,6 +139,54 @@ def _normalize_relation_type(value: str) -> str:
         return _RELATION_ALIAS_MAP[lowered]
     uppered = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_").upper()
     return uppered or "RELATES_TO"
+
+
+def _normalize_valid_to_output(value: Any) -> int | None:
+    if isinstance(value, (int, float, str)) and str(value).strip():
+        try:
+            normalized = int(value)
+        except Exception:
+            return None
+        if normalized >= _OPEN_ENDED_CHAPTER:
+            return None
+        return normalized
+    return None
+
+
+def _neo4j_projection_prefix() -> str:
+    raw = str(getattr(settings, "neo4j_gds_graph_name_prefix", "novel_ppr") or "novel_ppr")
+    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_").lower()
+    return normalized or "novel_ppr"
+
+
+def _neo4j_projection_scope_key(
+    *,
+    current_chapter: int,
+    use_chapter_filter: bool,
+    filter_without_chapter: bool,
+) -> str:
+    if not use_chapter_filter:
+        return "all"
+    if current_chapter > 0:
+        return f"chapter_{int(current_chapter)}"
+    if filter_without_chapter:
+        return "latest"
+    return "all_temporal"
+
+
+def _neo4j_projection_graph_name(project_id: int, *, scope_key: str, version: int) -> str:
+    safe_scope = re.sub(r"[^A-Za-z0-9_]+", "_", str(scope_key or "all")).strip("_").lower() or "all"
+    safe_version = max(int(version or 1), 1)
+    return f"{_neo4j_projection_prefix()}_{int(project_id)}_{safe_scope}_v{safe_version}"
+
+
+def _invalidate_graph_retrieval_cache(project_id: int) -> int:
+    try:
+        from app.services.context_compiler import invalidate_graph_retrieval_cache
+
+        return int(invalidate_graph_retrieval_cache(int(project_id)))
+    except Exception:
+        return 0
 
 
 def _fact_key(project_id: int, source_norm: str, relation: str, target_norm: str) -> str:
@@ -420,6 +475,495 @@ def merge_graph_candidates(
     return merged
 
 
+def _neo4j_auth() -> tuple[str, str] | None:
+    if settings.neo4j_username:
+        return (settings.neo4j_username, settings.neo4j_password)
+    return None
+
+
+def _version_parts(value: str) -> tuple[int, ...]:
+    raw = str(value or "").strip()
+    if not raw:
+        return ()
+    return tuple(int(chunk) for chunk in re.findall(r"\d+", raw))
+
+
+def _is_version_below(current: str, minimum: str) -> bool:
+    current_parts = _version_parts(current)
+    minimum_parts = _version_parts(minimum)
+    if not minimum_parts:
+        return False
+    if not current_parts:
+        return True
+    size = max(len(current_parts), len(minimum_parts))
+    padded_current = current_parts + (0,) * (size - len(current_parts))
+    padded_minimum = minimum_parts + (0,) * (size - len(minimum_parts))
+    return padded_current < padded_minimum
+
+
+def ensure_neo4j_gds_available(*, raise_on_error: bool = False) -> dict[str, Any]:
+    if not settings.neo4j_enabled:
+        return {"status": "skipped", "reason": "neo4j_disabled"}
+    if not bool(settings.neo4j_gds_required):
+        return {"status": "skipped", "reason": "gds_not_required"}
+    if not settings.neo4j_uri:
+        message = "Neo4j GDS is required but NEO4J_URI is empty."
+        if raise_on_error:
+            raise RuntimeError(message)
+        return {"status": "error", "reason": "neo4j_uri_missing", "message": message}
+    if GraphDatabase is None:
+        message = "Neo4j GDS is required but the neo4j driver is unavailable."
+        if raise_on_error:
+            raise RuntimeError(message)
+        return {"status": "error", "reason": "neo4j_driver_missing", "message": message}
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(settings.neo4j_uri, auth=_neo4j_auth())
+        with driver.session(database=settings.neo4j_database or None) as session:
+            row = session.run("RETURN gds.version() AS version").single()
+    except Exception as exc:
+        message = (
+            "Neo4j GDS is required for quality-first graph retrieval, "
+            "but gds.version() could not be resolved."
+        )
+        if raise_on_error:
+            raise RuntimeError(message) from exc
+        return {"status": "error", "reason": "gds_unavailable", "message": message}
+    finally:
+        if driver is not None:
+            driver.close()
+
+    version = str((row or {}).get("version") or "").strip()
+    minimum = str(settings.neo4j_gds_min_version or "").strip()
+    if not version:
+        message = "Neo4j GDS is required, but gds.version() returned an empty version string."
+        if raise_on_error:
+            raise RuntimeError(message)
+        return {"status": "error", "reason": "gds_version_empty", "message": message}
+    if _is_version_below(version, minimum):
+        message = (
+            f"Neo4j GDS version {version or 'unknown'} is below the required minimum "
+            f"{minimum}."
+        )
+        if raise_on_error:
+            raise RuntimeError(message)
+        return {
+            "status": "error",
+            "reason": "gds_version_too_low",
+            "message": message,
+            "version": version,
+            "minimum_version": minimum,
+        }
+
+    return {
+        "status": "ok",
+        "reason": "gds_available",
+        "version": version,
+        "minimum_version": minimum or None,
+    }
+
+
+def _get_neo4j_projection_state(
+    session: Any,
+    *,
+    project_id: int,
+    scope_key: str,
+) -> dict[str, Any]:
+    cypher = f"""
+    MERGE (catalog:{_GDS_PROJECTION_CATALOG_LABEL} {{project_id: $project_id, kind: $kind}})
+      ON CREATE SET
+        catalog.projection_version = 1,
+        catalog.created_at = $now,
+        catalog.updated_at = $now
+    MERGE (state:{_GDS_PROJECTION_STATE_LABEL} {{project_id: $project_id, kind: $kind, scope_key: $scope_key}})
+      ON CREATE SET
+        state.graph_name = '',
+        state.built_version = 0,
+        state.created_at = $now,
+        state.updated_at = $now
+    RETURN
+      coalesce(catalog.projection_version, 1) AS projection_version,
+      coalesce(catalog.invalidated_reason, '') AS invalidated_reason,
+      coalesce(state.graph_name, '') AS graph_name,
+      coalesce(state.built_version, 0) AS built_version,
+      coalesce(state.scope_key, $scope_key) AS scope_key
+    """
+    row = session.run(
+        cypher,
+        project_id=int(project_id),
+        kind=_GDS_PROJECTION_KIND_PPR,
+        scope_key=str(scope_key or "all"),
+        now=_utc_iso(),
+    ).single()
+    state = dict(row or {})
+    try:
+        state["projection_version"] = max(int(state.get("projection_version") or 1), 1)
+    except Exception:
+        state["projection_version"] = 1
+    try:
+        state["built_version"] = max(int(state.get("built_version") or 0), 0)
+    except Exception:
+        state["built_version"] = 0
+    state["graph_name"] = str(state.get("graph_name") or "").strip()
+    state["scope_key"] = str(state.get("scope_key") or scope_key or "all").strip() or "all"
+    state["invalidated_reason"] = str(state.get("invalidated_reason") or "").strip()
+    return state
+
+
+def _set_neo4j_projection_state(
+    session: Any,
+    *,
+    project_id: int,
+    scope_key: str,
+    graph_name: str,
+    built_version: int,
+    last_reason: str,
+) -> dict[str, Any]:
+    cypher = f"""
+    MERGE (state:{_GDS_PROJECTION_STATE_LABEL} {{project_id: $project_id, kind: $kind, scope_key: $scope_key}})
+      ON CREATE SET state.created_at = $now
+    SET
+      state.graph_name = $graph_name,
+      state.built_version = $built_version,
+      state.last_reason = $last_reason,
+      state.updated_at = $now
+    RETURN
+      coalesce(state.graph_name, '') AS graph_name,
+      coalesce(state.built_version, 0) AS built_version,
+      coalesce(state.scope_key, $scope_key) AS scope_key
+    """
+    row = session.run(
+        cypher,
+        project_id=int(project_id),
+        kind=_GDS_PROJECTION_KIND_PPR,
+        scope_key=str(scope_key or "all"),
+        graph_name=str(graph_name or ""),
+        built_version=max(int(built_version or 0), 0),
+        last_reason=str(last_reason or "rebuilt"),
+        now=_utc_iso(),
+    ).single()
+    return dict(row or {})
+
+
+def _mark_neo4j_projection_dirty(project_id: int, *, reason: str, session: Any | None = None) -> int:
+    cypher = f"""
+    MERGE (meta:{_GDS_PROJECTION_CATALOG_LABEL} {{project_id: $project_id, kind: $kind}})
+      ON CREATE SET
+        meta.projection_version = 0,
+        meta.created_at = $now
+    SET
+      meta.projection_version = coalesce(meta.projection_version, 0) + 1,
+      meta.invalidated_at = $now,
+      meta.invalidated_reason = $reason,
+      meta.updated_at = $now
+    RETURN coalesce(meta.projection_version, 1) AS projection_version
+    """
+
+    def _run(current_session: Any) -> int:
+        row = current_session.run(
+            cypher,
+            project_id=int(project_id),
+            kind=_GDS_PROJECTION_KIND_PPR,
+            reason=str(reason or "graph_mutation"),
+            now=_utc_iso(),
+        ).single()
+        version = max(int((row or {}).get("projection_version") or 1), 1)
+        _invalidate_graph_retrieval_cache(int(project_id))
+        return version
+
+    if session is not None:
+        return _run(session)
+    if not settings.neo4j_enabled:
+        return 0
+    if not settings.neo4j_uri:
+        return 0
+    if GraphDatabase is None:
+        return 0
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(settings.neo4j_uri, auth=_neo4j_auth())
+        with driver.session(database=settings.neo4j_database or None) as owned_session:
+            return _run(owned_session)
+    except Exception:
+        return 0
+    finally:
+        if driver is not None:
+            driver.close()
+
+
+def _neo4j_gds_graph_exists(session: Any, graph_name: str) -> bool:
+    row = session.run(
+        "CALL gds.graph.exists($graph_name) YIELD exists RETURN exists",
+        graph_name=str(graph_name or ""),
+    ).single()
+    return bool((row or {}).get("exists"))
+
+
+def _drop_neo4j_gds_graph_if_exists(session: Any, graph_name: str) -> bool:
+    normalized = str(graph_name or "").strip()
+    if not normalized:
+        return False
+    if not _neo4j_gds_graph_exists(session, normalized):
+        return False
+    session.run(
+        "CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName",
+        graph_name=normalized,
+    ).single()
+    return True
+
+
+def _drop_stale_neo4j_projection_graphs(
+    session: Any,
+    *,
+    project_id: int,
+    scope_key: str,
+    keep_graph_name: str,
+) -> int:
+    prefix = _neo4j_projection_graph_name(int(project_id), scope_key=scope_key, version=1)
+    prefix = prefix.rsplit("_v", 1)[0] + "_v"
+    rows = session.run(
+        """
+        CALL gds.graph.list()
+        YIELD graphName
+        WHERE graphName STARTS WITH $prefix AND graphName <> $keep_graph_name
+        RETURN collect(graphName) AS graph_names
+        """,
+        prefix=prefix,
+        keep_graph_name=str(keep_graph_name or ""),
+    ).single()
+    graph_names = rows.get("graph_names") if rows is not None else []
+    dropped = 0
+    if not isinstance(graph_names, list):
+        return 0
+    for graph_name in graph_names:
+        if _drop_neo4j_gds_graph_if_exists(session, str(graph_name or "")):
+            dropped += 1
+    return dropped
+
+
+def prewarm_neo4j_ppr_projection(
+    project_id: int,
+    *,
+    current_chapter: int | None = None,
+    reason: str = "graph_sync_worker",
+) -> dict[str, Any]:
+    if not settings.neo4j_enabled:
+        return {"status": "skipped", "reason": "neo4j_disabled"}
+    if not settings.neo4j_uri:
+        return {"status": "skipped", "reason": "neo4j_uri_missing"}
+    if GraphDatabase is None:
+        return {"status": "skipped", "reason": "neo4j_driver_missing"}
+
+    normalized_project_id = int(project_id or 0)
+    if normalized_project_id <= 0:
+        return {"status": "skipped", "reason": "project_id_invalid"}
+
+    gds_status = ensure_neo4j_gds_available()
+    if str(gds_status.get("status") or "") != "ok":
+        return gds_status
+
+    chapter_value = (
+        int(current_chapter or 0)
+        if isinstance(current_chapter, int) or str(current_chapter or "").isdigit()
+        else 0
+    )
+    use_chapter_filter = bool(settings.graph_temporal_enabled)
+    filter_without_chapter = bool(settings.graph_temporal_filter_without_chapter)
+    projection_scope_key = _neo4j_projection_scope_key(
+        current_chapter=chapter_value,
+        use_chapter_filter=use_chapter_filter,
+        filter_without_chapter=filter_without_chapter,
+    )
+
+    project_cypher = """
+    MATCH (source:Entity {project_id: $project_id})-[r:FACT {project_id: $project_id}]->(target:Entity {project_id: $project_id})
+    WHERE
+      coalesce(r.state, 'confirmed') = 'confirmed'
+      AND (
+        $use_chapter_filter = false OR
+        (
+          $current_chapter > 0
+          AND coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
+        )
+        OR (
+          $current_chapter <= 0
+          AND (
+            $filter_without_chapter = false
+            OR coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) = $open_ended_chapter
+          )
+        )
+      )
+    WITH gds.graph.project(
+      $graph_name,
+      source,
+      target,
+      {
+        relationshipProperties: {
+          weight: coalesce(toFloat(r.confidence), 1.0)
+        },
+        relationshipType: coalesce(r.rel_type, 'RELATED_TO')
+      }
+    ) AS g
+    RETURN g.graphName AS graphName
+    """
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(settings.neo4j_uri, auth=_neo4j_auth())
+        with driver.session(database=settings.neo4j_database or None) as session:
+            projection_state = _get_neo4j_projection_state(
+                session,
+                project_id=normalized_project_id,
+                scope_key=projection_scope_key,
+            )
+            projection_version = int(projection_state.get("projection_version") or 1)
+            previous_graph_name = str(projection_state.get("graph_name") or "").strip()
+            previous_built_version = int(projection_state.get("built_version") or 0)
+            graph_name = _neo4j_projection_graph_name(
+                normalized_project_id,
+                scope_key=projection_scope_key,
+                version=projection_version,
+            )
+            graph_exists = bool(
+                previous_graph_name
+                and previous_graph_name == graph_name
+                and previous_built_version == projection_version
+                and _neo4j_gds_graph_exists(session, graph_name)
+            )
+            if graph_exists:
+                return {
+                    "status": "ready",
+                    "reason": "graph_exists",
+                    "graph_name": graph_name,
+                    "scope_key": projection_scope_key,
+                    "projection_version": projection_version,
+                }
+
+            try:
+                row = session.run(
+                    project_cypher,
+                    graph_name=graph_name,
+                    project_id=normalized_project_id,
+                    use_chapter_filter=use_chapter_filter,
+                    current_chapter=chapter_value,
+                    filter_without_chapter=filter_without_chapter,
+                    open_ended_chapter=_OPEN_ENDED_CHAPTER,
+                ).single()
+                if row is None and not _neo4j_gds_graph_exists(session, graph_name):
+                    _set_neo4j_projection_state(
+                        session,
+                        project_id=normalized_project_id,
+                        scope_key=projection_scope_key,
+                        graph_name="",
+                        built_version=projection_version,
+                        last_reason="empty_projection",
+                    )
+                    return {
+                        "status": "empty",
+                        "reason": "empty_projection",
+                        "graph_name": "",
+                        "scope_key": projection_scope_key,
+                        "projection_version": projection_version,
+                    }
+            except Exception:
+                if not _neo4j_gds_graph_exists(session, graph_name):
+                    raise
+
+            _set_neo4j_projection_state(
+                session,
+                project_id=normalized_project_id,
+                scope_key=projection_scope_key,
+                graph_name=graph_name,
+                built_version=projection_version,
+                last_reason=reason or "prewarm",
+            )
+            if previous_graph_name and previous_graph_name != graph_name:
+                _drop_neo4j_gds_graph_if_exists(session, previous_graph_name)
+            _drop_stale_neo4j_projection_graphs(
+                session,
+                project_id=normalized_project_id,
+                scope_key=projection_scope_key,
+                keep_graph_name=graph_name,
+            )
+            return {
+                "status": "prewarmed",
+                "reason": reason or "prewarm",
+                "graph_name": graph_name,
+                "scope_key": projection_scope_key,
+                "projection_version": projection_version,
+            }
+    except Exception as exc:
+        return {"status": "error", "reason": "prewarm_failed", "message": str(exc)}
+    finally:
+        if driver is not None:
+            driver.close()
+
+
+def _rank_ppr_graph_edges(
+    rows: list[dict[str, Any]],
+    *,
+    score_by_norm: dict[str, float],
+    seed_norms: set[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    ranked: list[tuple[float, float, dict[str, Any]]] = []
+    seen: set[str] = set()
+
+    for row in rows:
+        source = str(row.get("source") or "unknown")
+        relation = str(row.get("relation") or "RELATED_TO")
+        target = str(row.get("target") or "unknown")
+        rel_props = row.get("rel_props") if isinstance(row.get("rel_props"), dict) else {}
+        source_norm = str(row.get("source_norm") or "").strip()
+        target_norm = str(row.get("target_norm") or "").strip()
+        fact_key = str(rel_props.get("fact_key") or "").strip()
+        dedupe_key = fact_key or f"{source_norm}|{relation}|{target_norm}"
+        if not dedupe_key or dedupe_key in seen:
+            continue
+
+        ppr_score = float(score_by_norm.get(source_norm, 0.0)) + float(score_by_norm.get(target_norm, 0.0))
+        seed_bonus = 0.15 if source_norm in seed_norms or target_norm in seed_norms else 0.0
+        confidence = _parse_float(rel_props.get("confidence"))
+        confidence_value = float(confidence or 0.0)
+        ranking_score = ppr_score + seed_bonus + confidence_value * 0.05
+        if ranking_score <= 0.0:
+            continue
+
+        updated_at = str(rel_props.get("updated_at") or "")
+        edge = f"{source} -[{relation}]-> {target}"
+        if rel_props:
+            edge = f"{edge} {json.dumps(rel_props, ensure_ascii=False)}"
+
+        ranked.append(
+            (
+                ranking_score,
+                confidence_value,
+                {
+                    "kind": "graph_edge",
+                    "title": edge[:64],
+                    "fact": _truncate_text(edge, 180),
+                    "confidence": round(confidence_value, 4) if confidence is not None else None,
+                    "updated_at": updated_at or None,
+                    "freshness_days": _freshness_days(updated_at) if updated_at else None,
+                    "fact_key": fact_key or None,
+                    "ppr_score": round(ppr_score, 4),
+                    "seed_match": bool(source_norm in seed_norms or target_norm in seed_norms),
+                },
+            )
+        )
+        seen.add(dedupe_key)
+
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    hits: list[dict[str, Any]] = []
+    for idx, (_, _, item) in enumerate(ranked[: max(int(limit), 1)], start=1):
+        item["id"] = idx
+        hits.append(item)
+    return hits
+
+
 def upsert_neo4j_graph_facts(
     project_id: int,
     facts: list[dict[str, Any]],
@@ -436,6 +980,7 @@ def upsert_neo4j_graph_facts(
         return []
     if not facts:
         return []
+    normalized_state = str(state or "").strip().lower() or "confirmed"
 
     auth: tuple[str, str] | None = None
     if settings.neo4j_username:
@@ -469,7 +1014,7 @@ def upsert_neo4j_graph_facts(
                 "confidence": _parse_float(fact.get("confidence")),
                 "origin": str(fact.get("origin") or "unknown"),
                 "valid_from_chapter": chapter_value if use_temporal else None,
-                "valid_to_chapter": None,
+                "valid_to_chapter": _OPEN_ENDED_CHAPTER if use_temporal else None,
             }
         )
 
@@ -481,7 +1026,7 @@ def upsert_neo4j_graph_facts(
     MATCH (s:Entity {project_id: $project_id, name_norm: row.source_norm})-[old:FACT {project_id: $project_id}]->(x:Entity {project_id: $project_id})
     WHERE
       old.rel_type = row.relation
-      AND coalesce(old.valid_to_chapter, 2147483647) >= row.valid_from_chapter
+      AND coalesce(old.valid_to_chapter, $open_ended_chapter) >= row.valid_from_chapter
       AND x.name_norm <> row.target_norm
     SET old.valid_to_chapter = row.valid_from_chapter - 1, old.updated_at = $now
     RETURN count(old) AS closed_count
@@ -524,16 +1069,23 @@ def upsert_neo4j_graph_facts(
                     project_id=project_id,
                     rows=rows,
                     now=_utc_iso(),
+                    open_ended_chapter=_OPEN_ENDED_CHAPTER,
                 ).consume()
             result = session.run(
                 cypher,
                 project_id=project_id,
                 rows=rows,
-                state=state,
+                state=normalized_state,
                 source_ref=source_ref,
                 now=_utc_iso(),
             )
             fact_keys = [str(row["fact_key"]) for row in result]
+            if normalized_state == "confirmed" and fact_keys and _mark_neo4j_projection_dirty(
+                project_id,
+                reason="facts_upserted",
+                session=session,
+            ) <= 0:
+                return []
     except Exception:
         return []
     finally:
@@ -598,7 +1150,7 @@ def list_neo4j_graph_candidates(
         $use_chapter_filter = false OR
         (
           coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
-          AND coalesce(toInteger(r.valid_to_chapter), 2147483647) >= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
         )
       )
     """
@@ -645,6 +1197,7 @@ def list_neo4j_graph_candidates(
                 keyword=normalized_keyword,
                 use_chapter_filter=use_chapter_filter,
                 current_chapter=chapter_value,
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
             ).single()
             if count_row is not None:
                 total = int(count_row.get("total", 0))
@@ -657,6 +1210,7 @@ def list_neo4j_graph_candidates(
                 keyword=normalized_keyword,
                 use_chapter_filter=use_chapter_filter,
                 current_chapter=chapter_value,
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
                 skip=skip,
                 limit=normalized_page_size,
             )
@@ -671,11 +1225,7 @@ def list_neo4j_graph_candidates(
                         valid_from = int(valid_from_raw)
                     except Exception:
                         valid_from = None
-                if isinstance(valid_to_raw, (int, float, str)) and str(valid_to_raw).strip():
-                    try:
-                        valid_to = int(valid_to_raw)
-                    except Exception:
-                        valid_to = None
+                valid_to = _normalize_valid_to_output(valid_to_raw)
                 updated_at = str(row.get("updated_at") or "").strip() or None
                 items.append(
                     {
@@ -749,7 +1299,7 @@ def promote_neo4j_candidate_facts(
         $use_chapter_filter = false OR
         (
           coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
-          AND coalesce(toInteger(r.valid_to_chapter), 2147483647) >= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
         )
       )
     WITH r
@@ -772,10 +1322,17 @@ def promote_neo4j_candidate_facts(
                 min_confidence=min_confidence_value,
                 use_chapter_filter=use_chapter_filter,
                 current_chapter=chapter_value,
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
                 limit=max_limit,
                 now=_utc_iso(),
             )
             promoted_fact_keys = [str(row.get("fact_key") or "").strip() for row in rows]
+            if promoted_fact_keys and _mark_neo4j_projection_dirty(
+                project_id,
+                reason="candidate_promoted",
+                session=session,
+            ) <= 0:
+                return []
     except Exception:
         return []
     finally:
@@ -826,7 +1383,7 @@ def update_neo4j_graph_fact_state(
         $use_chapter_filter = false OR
         (
           coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
-          AND coalesce(toInteger(r.valid_to_chapter), 2147483647) >= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
         )
       )
     SET r.state = $to_state, r.updated_at = $now
@@ -846,10 +1403,17 @@ def update_neo4j_graph_fact_state(
                 to_state=target_state,
                 use_chapter_filter=use_chapter_filter,
                 current_chapter=chapter_value,
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
                 now=_utc_iso(),
             ).single()
             if row is not None:
                 updated_count = int(row.get("updated_count", 0))
+            if updated_count > 0 and _mark_neo4j_projection_dirty(
+                project_id,
+                reason=f"fact_state_{target_state}",
+                session=session,
+            ) <= 0:
+                return 0
     except Exception:
         return 0
     finally:
@@ -887,7 +1451,7 @@ def delete_neo4j_graph_facts(
         MATCH ()-[r:FACT {project_id: $project_id}]->()
         WHERE
           r.fact_key IN $fact_keys
-          AND coalesce(r.valid_to_chapter, 2147483647) >= $current_chapter
+          AND coalesce(r.valid_to_chapter, $open_ended_chapter) >= $current_chapter
         SET r.valid_to_chapter = $current_chapter - 1, r.updated_at = $now
         RETURN count(r) AS deleted_count
         """
@@ -911,9 +1475,16 @@ def delete_neo4j_graph_facts(
                 fact_keys=normalized_keys,
                 current_chapter=chapter_value,
                 now=_utc_iso(),
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
             ).single()
             if row is not None:
                 deleted_count = int(row.get("deleted_count", 0))
+            if deleted_count > 0 and _mark_neo4j_projection_dirty(
+                project_id,
+                reason="facts_deleted",
+                session=session,
+            ) <= 0:
+                return 0
     except Exception:
         return 0
     finally:
@@ -956,7 +1527,7 @@ def delete_neo4j_graph_facts_by_sources(
         MATCH (s:Entity {project_id: $project_id})-[r:FACT {project_id: $project_id}]->()
         WHERE
           s.name_norm IN $source_norms
-          AND coalesce(r.valid_to_chapter, 2147483647) >= $current_chapter
+          AND coalesce(r.valid_to_chapter, $open_ended_chapter) >= $current_chapter
         SET r.valid_to_chapter = $current_chapter - 1, r.updated_at = $now
         RETURN count(r) AS deleted_count
         """
@@ -980,9 +1551,16 @@ def delete_neo4j_graph_facts_by_sources(
                 source_norms=normalized_sources,
                 current_chapter=chapter_value,
                 now=_utc_iso(),
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
             ).single()
             if row is not None:
                 deleted_count = int(row.get("deleted_count", 0))
+            if deleted_count > 0 and _mark_neo4j_projection_dirty(
+                project_id,
+                reason="facts_deleted_by_source",
+                session=session,
+            ) <= 0:
+                return 0
     except Exception:
         return 0
     finally:
@@ -1022,6 +1600,12 @@ def delete_all_neo4j_graph_facts(project_id: int) -> int:
             ).single()
             if row is not None:
                 deleted_count = int(row.get("deleted_count", 0))
+            if deleted_count > 0 and _mark_neo4j_projection_dirty(
+                project_id,
+                reason="all_facts_deleted",
+                session=session,
+            ) <= 0:
+                return 0
     except Exception:
         return 0
     finally:
@@ -1177,12 +1761,114 @@ def fetch_neo4j_graph_facts(
     chapter_value = int(current_chapter or 0) if isinstance(current_chapter, int) or str(current_chapter or "").isdigit() else 0
     use_chapter_filter = bool(settings.graph_temporal_enabled)
     filter_without_chapter = bool(settings.graph_temporal_filter_without_chapter)
+    projection_scope_key = _neo4j_projection_scope_key(
+        current_chapter=chapter_value,
+        use_chapter_filter=use_chapter_filter,
+        filter_without_chapter=filter_without_chapter,
+    )
 
     auth: tuple[str, str] | None = None
     if settings.neo4j_username:
         auth = (settings.neo4j_username, settings.neo4j_password)
 
-    cypher = """
+    seed_cypher = """
+    MATCH (seed:Entity {project_id: $project_id})
+    WITH seed,
+      CASE
+        WHEN $anchor <> '' AND (
+          toLower(coalesce(seed.name_norm, '')) = $anchor OR
+          toLower(coalesce(seed.name, '')) = $anchor
+        ) THEN 2
+        WHEN $anchor <> '' AND (
+          toLower(coalesce(seed.name_norm, '')) CONTAINS $anchor OR
+          toLower(coalesce(seed.name, '')) CONTAINS $anchor
+        ) THEN 1
+        ELSE 0
+      END AS anchor_score,
+      size([term IN $terms WHERE
+        toLower(coalesce(seed.name, '')) CONTAINS term OR
+        toLower(coalesce(seed.name_norm, '')) CONTAINS term
+      ]) AS term_hits
+    WHERE anchor_score > 0 OR term_hits > 0
+    RETURN
+      coalesce(seed.name, '') AS name,
+      coalesce(seed.name_norm, '') AS name_norm
+    ORDER BY anchor_score DESC, term_hits DESC, name ASC
+    LIMIT 8
+    """
+
+    project_cypher = """
+    MATCH (source:Entity {project_id: $project_id})-[r:FACT {project_id: $project_id}]->(target:Entity {project_id: $project_id})
+    WHERE
+      coalesce(r.state, 'confirmed') = 'confirmed'
+      AND (
+        $use_chapter_filter = false OR
+        (
+          $current_chapter > 0
+          AND coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
+        )
+        OR (
+          $current_chapter <= 0
+          AND (
+            $filter_without_chapter = false
+            OR coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) = $open_ended_chapter
+          )
+        )
+      )
+    WITH gds.graph.project(
+      $graph_name,
+      source,
+      target,
+      {
+        relationshipProperties: {
+          weight: coalesce(toFloat(r.confidence), 1.0)
+        },
+        relationshipType: coalesce(r.rel_type, 'RELATED_TO')
+      }
+    ) AS g
+    RETURN g.graphName AS graphName
+    """
+
+    ppr_cypher = """
+    MATCH (seed:Entity {project_id: $project_id})
+    WITH seed,
+      CASE
+        WHEN $anchor <> '' AND (
+          toLower(coalesce(seed.name_norm, '')) = $anchor OR
+          toLower(coalesce(seed.name, '')) = $anchor
+        ) THEN 2
+        WHEN $anchor <> '' AND (
+          toLower(coalesce(seed.name_norm, '')) CONTAINS $anchor OR
+          toLower(coalesce(seed.name, '')) CONTAINS $anchor
+        ) THEN 1
+        ELSE 0
+      END AS anchor_score,
+      size([term IN $terms WHERE
+        toLower(coalesce(seed.name, '')) CONTAINS term OR
+        toLower(coalesce(seed.name_norm, '')) CONTAINS term
+      ]) AS term_hits
+    WHERE anchor_score > 0 OR term_hits > 0
+    WITH collect(seed) AS source_nodes
+    CALL gds.pageRank.stream(
+      $graph_name,
+      {
+        sourceNodes: source_nodes,
+        maxIterations: 20,
+        dampingFactor: 0.85,
+        relationshipWeightProperty: 'weight'
+      }
+    )
+    YIELD nodeId, score
+    RETURN
+      coalesce(gds.util.asNode(nodeId).name, '') AS name,
+      coalesce(gds.util.asNode(nodeId).name_norm, '') AS name_norm,
+      score
+    ORDER BY score DESC, name ASC
+    LIMIT $limit
+    """
+
+    edge_cypher = """
     MATCH (a:Entity {project_id: $project_id})-[r:FACT {project_id: $project_id}]->(b:Entity {project_id: $project_id})
     WHERE
       coalesce(r.state, 'confirmed') = 'confirmed'
@@ -1191,52 +1877,135 @@ def fetch_neo4j_graph_facts(
         (
           $current_chapter > 0
           AND coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
-          AND coalesce(toInteger(r.valid_to_chapter), 2147483647) >= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
         )
         OR (
           $current_chapter <= 0
           AND (
             $filter_without_chapter = false
-            OR r.valid_to_chapter IS NULL
+            OR coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) = $open_ended_chapter
           )
         )
       )
       AND (
-        size($terms) = 0 OR any(term IN $terms WHERE
-          toLower(coalesce(a.name, '')) CONTAINS term OR
-          toLower(coalesce(b.name, '')) CONTAINS term OR
-          toLower(coalesce(r.rel_type, '')) CONTAINS term
-        )
-      )
-      AND (
-        $anchor = '' OR
-        toLower(coalesce(a.name, '')) CONTAINS $anchor OR
-        toLower(coalesce(b.name, '')) CONTAINS $anchor
+        coalesce(a.name_norm, '') IN $ranked_norms OR
+        coalesce(b.name_norm, '') IN $ranked_norms
       )
     RETURN
-      coalesce(a.name, toString(id(a))) AS source,
+      coalesce(a.name, a.name_norm, elementId(a)) AS source,
+      coalesce(a.name_norm, '') AS source_norm,
       coalesce(r.rel_type, 'RELATED_TO') AS relation,
-      coalesce(b.name, toString(id(b))) AS target,
+      coalesce(b.name, b.name_norm, elementId(b)) AS target,
+      coalesce(b.name_norm, '') AS target_norm,
       properties(r) AS rel_props
     LIMIT $limit
     """
-
-    records: list[dict[str, Any]] = []
+    graph_name = ""
+    seed_rows: list[dict[str, Any]] = []
+    ranked_rows: list[dict[str, Any]] = []
+    edge_rows: list[dict[str, Any]] = []
     driver = None
     try:
         driver = GraphDatabase.driver(settings.neo4j_uri, auth=auth)
         with driver.session(database=settings.neo4j_database or None) as session:
-            rows = session.run(
-                cypher,
+            seed_rows = session.run(
+                seed_cypher,
                 project_id=project_id,
                 terms=normalized_terms,
                 anchor=normalized_anchor,
-                limit=limit,
+            ).data()
+            if not seed_rows:
+                return []
+
+            projection_state = _get_neo4j_projection_state(
+                session,
+                project_id=project_id,
+                scope_key=projection_scope_key,
+            )
+            projection_version = int(projection_state.get("projection_version") or 1)
+            previous_graph_name = str(projection_state.get("graph_name") or "").strip()
+            previous_built_version = int(projection_state.get("built_version") or 0)
+            graph_name = _neo4j_projection_graph_name(
+                project_id,
+                scope_key=projection_scope_key,
+                version=projection_version,
+            )
+            graph_exists = bool(
+                previous_graph_name
+                and previous_graph_name == graph_name
+                and previous_built_version == projection_version
+                and _neo4j_gds_graph_exists(session, graph_name)
+            )
+            if not graph_exists:
+                try:
+                    row = session.run(
+                        project_cypher,
+                        graph_name=graph_name,
+                        project_id=project_id,
+                        use_chapter_filter=use_chapter_filter,
+                        current_chapter=chapter_value,
+                        filter_without_chapter=filter_without_chapter,
+                        open_ended_chapter=_OPEN_ENDED_CHAPTER,
+                    ).single()
+                    if row is None and not _neo4j_gds_graph_exists(session, graph_name):
+                        _set_neo4j_projection_state(
+                            session,
+                            project_id=project_id,
+                            scope_key=projection_scope_key,
+                            graph_name="",
+                            built_version=projection_version,
+                            last_reason="empty_projection",
+                        )
+                        return []
+                except Exception:
+                    if not _neo4j_gds_graph_exists(session, graph_name):
+                        raise
+                _set_neo4j_projection_state(
+                    session,
+                    project_id=project_id,
+                    scope_key=projection_scope_key,
+                    graph_name=graph_name,
+                    built_version=projection_version,
+                    last_reason="rebuilt",
+                )
+                if previous_graph_name and previous_graph_name != graph_name:
+                    _drop_neo4j_gds_graph_if_exists(session, previous_graph_name)
+                _drop_stale_neo4j_projection_graphs(
+                    session,
+                    project_id=project_id,
+                    scope_key=projection_scope_key,
+                    keep_graph_name=graph_name,
+                )
+
+            ranked_rows = session.run(
+                ppr_cypher,
+                graph_name=graph_name,
+                project_id=project_id,
+                terms=normalized_terms,
+                anchor=normalized_anchor,
+                limit=max(int(limit) * 4, 12),
+            ).data()
+            if not ranked_rows:
+                return []
+
+            ranked_norms = [
+                str(row.get("name_norm") or "").strip()
+                for row in ranked_rows
+                if str(row.get("name_norm") or "").strip()
+            ]
+            if not ranked_norms:
+                return []
+
+            edge_rows = session.run(
+                edge_cypher,
+                project_id=project_id,
+                ranked_norms=ranked_norms,
+                limit=max(int(limit) * 4, 16),
                 use_chapter_filter=use_chapter_filter,
                 current_chapter=chapter_value,
                 filter_without_chapter=filter_without_chapter,
-            )
-            records = rows.data()
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
+            ).data()
     except Exception:
         if raise_on_error:
             raise
@@ -1245,29 +2014,22 @@ def fetch_neo4j_graph_facts(
         if driver is not None:
             driver.close()
 
-    facts: list[dict[str, Any]] = []
-    for idx, row in enumerate(records[:limit], start=1):
-        source = str(row.get("source") or "unknown")
-        relation = str(row.get("relation") or "RELATED_TO")
-        target = str(row.get("target") or "unknown")
-        rel_props = row.get("rel_props") if isinstance(row.get("rel_props"), dict) else {}
-        confidence = _parse_float(rel_props.get("confidence"))
-        updated_at = str(rel_props.get("updated_at") or "")
-        edge = f"{source} -[{relation}]-> {target}"
-        if rel_props:
-            edge = f"{edge} {json.dumps(rel_props, ensure_ascii=False)}"
-        facts.append(
-            {
-                "kind": "graph_edge",
-                "id": idx,
-                "title": edge[:64],
-                "fact": _truncate_text(edge, 180),
-                "confidence": round(confidence, 4) if isinstance(confidence, float) else None,
-                "updated_at": updated_at or None,
-                "freshness_days": _freshness_days(updated_at) if updated_at else None,
-            }
-        )
-    return facts
+    score_by_norm = {
+        str(row.get("name_norm") or "").strip(): float(row.get("score") or 0.0)
+        for row in ranked_rows
+        if str(row.get("name_norm") or "").strip()
+    }
+    seed_norms = {
+        str(row.get("name_norm") or "").strip()
+        for row in seed_rows
+        if str(row.get("name_norm") or "").strip()
+    }
+    return _rank_ppr_graph_edges(
+        edge_rows,
+        score_by_norm=score_by_norm,
+        seed_norms=seed_norms,
+        limit=limit,
+    )
 
 
 def fetch_neo4j_graph_timeline_snapshot(
@@ -1317,20 +2079,20 @@ def fetch_neo4j_graph_timeline_snapshot(
         (
           $current_chapter > 0
           AND coalesce(toInteger(r.valid_from_chapter), -2147483648) <= $current_chapter
-          AND coalesce(toInteger(r.valid_to_chapter), 2147483647) >= $current_chapter
+          AND coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) >= $current_chapter
         )
         OR (
           $current_chapter <= 0
           AND (
             $filter_without_chapter = false
-            OR r.valid_to_chapter IS NULL
+            OR coalesce(toInteger(r.valid_to_chapter), $open_ended_chapter) = $open_ended_chapter
           )
         )
       )
     RETURN
-      coalesce(a.name, toString(id(a))) AS source,
+      coalesce(a.name, elementId(a)) AS source,
       coalesce(r.rel_type, 'RELATED_TO') AS relation,
-      coalesce(b.name, toString(id(b))) AS target,
+      coalesce(b.name, elementId(b)) AS target,
       properties(r) AS rel_props
     LIMIT $limit
     """
@@ -1347,6 +2109,7 @@ def fetch_neo4j_graph_timeline_snapshot(
                 use_chapter_filter=use_chapter_filter,
                 current_chapter=chapter_value,
                 filter_without_chapter=filter_without_chapter,
+                open_ended_chapter=_OPEN_ENDED_CHAPTER,
             )
             records = rows.data()
     except Exception:
@@ -1376,7 +2139,7 @@ def fetch_neo4j_graph_timeline_snapshot(
                 "relation": relation,
                 "confidence": round(confidence, 4) if isinstance(confidence, float) else None,
                 "valid_from_chapter": int(valid_from) if isinstance(valid_from, int) else None,
-                "valid_to_chapter": int(valid_to) if isinstance(valid_to, int) else None,
+                "valid_to_chapter": _normalize_valid_to_output(valid_to),
                 "freshness_days": _freshness_days(rel_props.get("updated_at")),
                 "_order": idx,
             }
