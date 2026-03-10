@@ -1,11 +1,11 @@
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from app.core.auth import AuthPrincipal, get_current_principal
 from app.core.database import get_session
-from app.schemas.chat import GhostTextRequest, GhostTextResponse
+from app.schemas.chat import GhostTextResponse, GhostTextRewriteRequest
 from app.services.chat_service import (
     get_project_chapter,
     get_prompt_template,
@@ -23,11 +23,29 @@ from .chat_helpers import (
 router = APIRouter()
 
 
-@router.post("/ghost-text", response_model=GhostTextResponse)
-async def generate_ghost_text(
-    payload: GhostTextRequest,
+@router.post("/ghost-text/polish", response_model=GhostTextResponse)
+async def generate_ghost_polish(
+    payload: GhostTextRewriteRequest,
     db: Session = Depends(get_session),
     principal: AuthPrincipal = Depends(get_current_principal),
+):
+    return await _generate_ghost_rewrite("polish", payload, db, principal)
+
+
+@router.post("/ghost-text/expand", response_model=GhostTextResponse)
+async def generate_ghost_expand(
+    payload: GhostTextRewriteRequest,
+    db: Session = Depends(get_session),
+    principal: AuthPrincipal = Depends(get_current_principal),
+):
+    return await _generate_ghost_rewrite("expand", payload, db, principal)
+
+
+async def _generate_ghost_rewrite(
+    rewrite_mode: Literal["polish", "expand"],
+    payload: GhostTextRewriteRequest,
+    db: Session,
+    principal: AuthPrincipal,
 ):
     _ensure_project_access(payload.project_id, principal)
     try:
@@ -39,18 +57,9 @@ async def generate_ghost_text(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    normalized_mode = str(payload.mode or "continue").strip().lower()
-    if normalized_mode not in {"continue", "polish", "expand"}:
-        raise HTTPException(status_code=400, detail="unsupported ghost mode")
-
     source_text = str(payload.text or "").strip()
-    prefix_text = str(payload.prefix_text or "").strip()
-    if normalized_mode == "continue":
-        if not prefix_text:
-            raise HTTPException(status_code=400, detail="prefix_text is required for continue mode")
-    else:
-        if not source_text:
-            raise HTTPException(status_code=400, detail="text is required for polish/expand mode")
+    if not source_text:
+        raise HTTPException(status_code=400, detail="text is required")
 
     template = None
     if payload.prompt_template_id is not None:
@@ -214,8 +223,7 @@ async def generate_ghost_text(
     try:
         generation = await generate_chat(
             _build_ghost_user_input(
-                normalized_mode,
-                prefix_text,
+                rewrite_mode,
                 source_text=source_text,
                 style_prefix=template_user_prompt_prefix,
                 outline_hint="\n".join(outline_hint_parts),
@@ -226,12 +234,12 @@ async def generate_ghost_text(
                     "thinking_enabled": False,
                     "scene_beat_id": payload.scene_beat_id,
                     "source": "ghost_text",
-                    "mode": normalized_mode,
+                    "mode": rewrite_mode,
                 },
             },
             model_override=payload.model,
             thinking_enabled=False,
-            temperature_profile=payload.temperature_profile or ("chat" if normalized_mode in {"polish", "expand"} else "ghost"),
+            temperature_profile=payload.temperature_profile or "chat",
             temperature_override=payload.temperature_override,
             runtime_config=runtime_model_profile,
         )
@@ -240,12 +248,12 @@ async def generate_ghost_text(
 
     suggestion = _normalize_ghost_suggestion(
         generation.assistant_text,
-        max_length=5000 if normalized_mode in {"polish", "expand"} else 200,
+        max_length=5000,
     )
     usage = {
         **(generation.usage or {}),
         "ghost_context_mode": "light",
-        "ghost_mode": normalized_mode,
+        "ghost_mode": rewrite_mode,
         "style_guard": bool(payload.style_guard),
         "prompt_template_hit": bool(template is not None),
     }

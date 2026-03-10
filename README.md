@@ -65,7 +65,7 @@ API (FastAPI)
    └─ 一致性报告接口
    │
    ├─ PostgreSQL（主数据 + 异步任务）
-   ├─ Neo4j（关系事实）
+   ├─ Neo4j（关系事实，quality-first 图检索依赖 GDS）
    └─ LightRAG（可选，语义召回）
 
 Worker
@@ -108,6 +108,31 @@ docker compose up -d --build
 
 默认启动：`web + api + worker + postgres + neo4j`
 
+说明：
+- Docker 默认使用仓库内的 Neo4j GDS 镜像，直接 baked-in 匹配版本的 Graph Data Science（GDS）jar。
+- 质量优先的图检索把 GDS 视为硬依赖；API 启动时会主动探测 GDS。
+- Neo4j 自身 healthcheck 也会执行 `gds.version()`；若 GDS 缺失或未正确加载，API 会直接报错停止启动，而不是静默降级到低质量图检索。
+- 图检索默认使用命名 projection graph（GDS in-memory graph），而不是每次临时投影：
+  - 命名规则：`NEO4J_GDS_GRAPH_NAME_PREFIX + project_id + scope + version`
+  - 同一 `project + scope + version` 直接复用已有图
+  - 图事实写入/删除/状态变更只 bump version，不在写请求内全量重建
+  - 下一次图检索按新 version 懒重建，并清理同 scope 的旧版本图
+
+### 交付版（镜像内置 ONNX reranker）
+
+当你要把服务交给别的机器直接部署，而不想再额外挂载 `apps/api/models` 时，使用交付版：
+
+```bash
+docker compose -f docker-compose.delivery.yml up -d --build
+```
+
+说明：
+- 交付版会把 `apps/api/models` 中的 ONNX reranker 一并打进镜像。
+- Neo4j 同样使用 baked-in GDS 镜像，不依赖容器启动时在线拉插件。
+- `api` 与 `worker` 复用同一份 baked image，避免重复构建同一个大镜像。
+- 这更适合“交付/封版/离线部署”，不适合频繁本地迭代。
+- 若模型目录很大，首次构建时间和磁盘占用都会明显上升，这是正常现象。
+
 ### 3) 验证服务
 
 - Web: `http://localhost:8080`
@@ -131,6 +156,11 @@ docker compose --profile rag up -d
 ## 本地开发（Hybrid）
 
 推荐先用 Docker 拉起依赖，再本地启动 API/Web。
+
+如果只是本地开发，优先使用默认 `docker-compose.yml`：
+- 默认通过 bind mount 挂载 `./apps/api/models:/app/models:ro`
+- 不会把大体积 ONNX 模型打进镜像
+- 更适合频繁 rebuild 和调试
 
 ### 启动依赖
 
@@ -196,6 +226,9 @@ NEO4J_ENABLED=true
 NEO4J_URI=bolt://neo4j:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=neo4jpassword
+NEO4J_DATABASE=neo4j
+NEO4J_GDS_GRAPH_NAME_PREFIX=novel_ppr
+NEO4J_GDS_REQUIRED=true
 ```
 
 ### 可商榷策略开关

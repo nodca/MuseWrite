@@ -74,11 +74,11 @@ class GhostTextEndpointTestCase(unittest.TestCase):
         )
 
         response = self.client.post(
-            "/api/chat/ghost-text",
+            "/api/chat/ghost-text/polish",
             headers=self._auth_header(),
             json={
                 "project_id": 1,
-                "prefix_text": "克莱恩跟着值夜者穿过廷根街，塔罗会的低语在耳边回响。",
+                "text": "克莱恩跟着值夜者穿过廷根街，塔罗会的低语在耳边回响。",
                 "active_roles": ["克莱恩", "邓恩"],
             },
         )
@@ -104,11 +104,11 @@ class GhostTextEndpointTestCase(unittest.TestCase):
         )
 
         response = self.client.post(
-            "/api/chat/ghost-text",
+            "/api/chat/ghost-text/polish",
             headers=self._auth_header(),
             json={
                 "project_id": 1,
-                "prefix_text": "克莱恩跟着值夜者穿过廷根街，塔罗会的低语在耳边回响。",
+                "text": "克莱恩跟着值夜者穿过廷根街，塔罗会的低语在耳边回响。",
                 "active_roles": ["克莱恩", "邓恩"],
             },
         )
@@ -132,11 +132,10 @@ class GhostTextEndpointTestCase(unittest.TestCase):
         )
 
         response = self.client.post(
-            "/api/chat/ghost-text",
+            "/api/chat/ghost-text/polish",
             headers=self._auth_header(),
             json={
                 "project_id": 1,
-                "mode": "polish",
                 "text": "原文段落",
             },
         )
@@ -159,11 +158,10 @@ class GhostTextEndpointTestCase(unittest.TestCase):
         mock_resolve_model_profile_runtime.return_value = None
 
         response = self.client.post(
-            "/api/chat/ghost-text",
+            "/api/chat/ghost-text/expand",
             headers=self._auth_header(),
             json={
                 "project_id": 1,
-                "mode": "expand",
                 "text": "",
             },
         )

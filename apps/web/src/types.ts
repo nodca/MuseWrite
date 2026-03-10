@@ -29,14 +29,12 @@ export interface ChatStreamRequest {
   model_profile_id?: string | null;
 }
 
-export interface GhostTextRequest {
+export interface GhostTextRewriteRequest {
   project_id: number;
-  mode?: "continue" | "polish" | "expand";
   chapter_id?: number | null;
   scene_beat_id?: number | null;
   prompt_template_id?: number | null;
-  prefix_text?: string;
-  text?: string;
+  text: string;
   chapter_goal?: string | null;
   active_roles?: string[] | null;
   model: string | null;

@@ -246,13 +246,12 @@ def normalize_index_lifecycle_dead_letter_row(
 
 def build_ghost_user_input(
     mode: str,
-    prefix_text: str,
     *,
     source_text: str = "",
     style_prefix: str = "",
     outline_hint: str = "",
 ) -> str:
-    normalized_mode = str(mode or "continue").strip().lower()
+    normalized_mode = str(mode or "polish").strip().lower()
     style_note = ""
     style_hint = (style_prefix or "").strip()
     if style_hint:
@@ -295,19 +294,7 @@ def build_ghost_user_input(
             f"### Context:\n原文：\n{compact_source}"
         )
 
-    compact_prefix = (prefix_text or "").strip()
-    if len(compact_prefix) > 1800:
-        compact_prefix = compact_prefix[-1800:]
-    return (
-        "你是小说写作助手。请严格遵循下面的 Instruction，输出最终正文，不要解释。\n"
-        "### Instruction:\n"
-        "- 任务：生成可直接接在正文后的下一小段续写。\n"
-        "- 约束：20~80字，保持当前人称与语气，不引入越权设定。\n"
-        "- 禁止：引号包裹、分点、元叙事解释。\n"
-        "### Output:\n"
-        "只输出续写段落文本。\n"
-        f"### Context:\n正文前缀：\n{compact_prefix}{style_note}{outline_note}"
-    )
+    raise ValueError(f"unsupported ghost rewrite mode: {normalized_mode}")
 
 
 def normalize_ghost_suggestion(value: str, *, max_length: int = 200) -> str:

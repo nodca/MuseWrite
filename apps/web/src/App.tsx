@@ -20,7 +20,8 @@ import {
   deleteSceneBeat,
   deleteProjectChapter,
   decideAction,
-  generateGhostText,
+  generateGhostPolish,
+  generateGhostExpand,
   getActionLogs,
   getForeshadowingCards,
   getProjectConsistencyAudits,
@@ -1707,16 +1708,6 @@ const SettingsDialog = memo(function SettingsDialog({
                   </select>
                 </label>
                 <label>
-                  Ghost 触发策略
-                  <select
-                    value={ghostAutoEnabled ? "auto" : "manual"}
-                    onChange={(event) => setGhostAutoEnabled(event.target.value === "auto")}
-                  >
-                    <option value="manual">手动触发（默认）</option>
-                    <option value="auto">自动触发（900ms 去抖）</option>
-                  </select>
-                </label>
-                <label>
                   打字机滚动
                   <select
                     value={typewriterModeEnabled ? "on" : "off"}
@@ -2020,6 +2011,18 @@ const SettingsDialog = memo(function SettingsDialog({
                     <option value="chat">chat（常规）</option>
                     <option value="action">action（保守）</option>
                     <option value="brainstorm">brainstorm（发散）</option>
+                  </select>
+                </label>
+                <label>
+                  Ghost 自动建议
+                  <small className="field-help">开启后会在正文变化时自动请求续写建议（适合连续写作）。</small>
+                  <select
+                    value={ghostAutoEnabled ? "on" : "off"}
+                    onChange={(event) => setGhostAutoEnabled(event.target.value === "on")}
+                    disabled={streaming}
+                  >
+                    <option value="off">关闭</option>
+                    <option value="on">开启</option>
                   </select>
                 </label>
                 <label>
@@ -2826,6 +2829,14 @@ export default function App() {
   const [selectedModelProfileId, setSelectedModelProfileId] = useState<string | null>(null);
   const [activeModelProfileId, setActiveModelProfileId] = useState<string | null>(null);
   const [ghostModelProfileId, setGhostModelProfileId] = useState<string | null>(null);
+  const [chatTemperatureProfile, setChatTemperatureProfile] = useState<"action" | "chat" | "brainstorm">("chat");
+  const [ghostTemperatureProfile, setGhostTemperatureProfile] = useState<"ghost" | "chat" | "action" | "brainstorm">(
+    "ghost"
+  );
+  const [ghostAutoEnabled, setGhostAutoEnabled] = useState(false);
+  const [ghostLoading, setGhostLoading] = useState(false);
+  const [ghostText, setGhostText] = useState("");
+  const [ghostError, setGhostError] = useState<string | null>(null);
   const [modelProfileDraftIdInput, setModelProfileDraftIdInput] = useState("");
   const [modelProfileName, setModelProfileName] = useState("");
   const [modelProfileProvider, setModelProfileProvider] = useState<
@@ -2838,14 +2849,6 @@ export default function App() {
   const [modelProfileModel, setModelProfileModel] = useState("");
   const [modelProfileSaving, setModelProfileSaving] = useState(false);
   const [referenceProjectInput, setReferenceProjectInput] = useState("");
-  const [ghostText, setGhostText] = useState("");
-  const [ghostLoading, setGhostLoading] = useState(false);
-  const [ghostError, setGhostError] = useState<string | null>(null);
-  const [ghostAutoEnabled, setGhostAutoEnabled] = useState(false);
-  const [chatTemperatureProfile, setChatTemperatureProfile] = useState<"action" | "chat" | "brainstorm">("action");
-  const [ghostTemperatureProfile, setGhostTemperatureProfile] = useState<
-    "ghost" | "chat" | "action" | "brainstorm"
-  >("ghost");
   const [temperatureOverrideInput, setTemperatureOverrideInput] = useState("");
   const [contextWindowProfile, setContextWindowProfile] = useState<
     "balanced" | "chapter_focus" | "world_focus" | "minimal"
@@ -2876,6 +2879,29 @@ export default function App() {
   const settingsDialogReturnFocusRef = useRef<HTMLElement | null>(null);
   const previousAssistantDrawerOpenRef = useRef(false);
   const previousSettingsDialogOpenRef = useRef(false);
+  const ghostRequestRef = useRef(0);
+  const acceptGhostTextRef = useRef<(() => void) | null>(null);
+  const rejectGhostTextRef = useRef<(() => void) | null>(null);
+  const regenerateGhostTextRef = useRef<(() => void) | null>(null);
+  const writingShortcutStateRef = useRef<{
+    uiMode: typeof uiMode;
+    assistantDrawerOpen: boolean;
+    settingsDialogOpen: boolean;
+    hasGhostText: boolean;
+    ghostLoading: boolean;
+    draftLoading: boolean;
+    draftSaving: boolean;
+    activeChapterId: number | null;
+  }>({
+    uiMode,
+    assistantDrawerOpen: false,
+    settingsDialogOpen: false,
+    hasGhostText: false,
+    ghostLoading: false,
+    draftLoading: false,
+    draftSaving: false,
+    activeChapterId: null,
+  });
   const lastSavedDraftRef = useRef<{
     chapterId: number | null;
     volumeId: number | null;
@@ -2890,6 +2916,15 @@ export default function App() {
 
   const ghostModelProfileStorageKey = useMemo(() => {
     return `novel-platform:ghost-model-profile:v1:${projectId}`;
+  }, [projectId]);
+  const chatTemperatureProfileStorageKey = useMemo(() => {
+    return `novel-platform:chat-temperature-profile:v1:${projectId}`;
+  }, [projectId]);
+  const ghostTemperatureProfileStorageKey = useMemo(() => {
+    return `novel-platform:ghost-temperature-profile:v1:${projectId}`;
+  }, [projectId]);
+  const ghostAutoEnabledStorageKey = useMemo(() => {
+    return `novel-platform:ghost-auto-enabled:v1:${projectId}`;
   }, [projectId]);
 
   useEffect(() => {
@@ -2919,34 +2954,115 @@ export default function App() {
       // ignore localStorage quota/permission failures
     }
   }, [ghostModelProfileId, ghostModelProfileStorageKey]);
-  const ghostCacheRef = useRef<Map<string, string>>(new Map());
-  const ghostRequestRef = useRef(0);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = (window.localStorage.getItem(chatTemperatureProfileStorageKey) || "").trim();
+      if (raw === "action" || raw === "chat" || raw === "brainstorm") {
+        setChatTemperatureProfile(raw);
+      }
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [chatTemperatureProfileStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(chatTemperatureProfileStorageKey, chatTemperatureProfile);
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [chatTemperatureProfile, chatTemperatureProfileStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = (window.localStorage.getItem(ghostTemperatureProfileStorageKey) || "").trim();
+      if (raw === "ghost" || raw === "chat" || raw === "action" || raw === "brainstorm") {
+        setGhostTemperatureProfile(raw);
+      }
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [ghostTemperatureProfileStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(ghostTemperatureProfileStorageKey, ghostTemperatureProfile);
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [ghostTemperatureProfile, ghostTemperatureProfileStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = (window.localStorage.getItem(ghostAutoEnabledStorageKey) || "").trim().toLowerCase();
+      if (raw === "1" || raw === "true" || raw === "on") {
+        setGhostAutoEnabled(true);
+      } else if (raw === "0" || raw === "false" || raw === "off") {
+        setGhostAutoEnabled(false);
+      }
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [ghostAutoEnabledStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(ghostAutoEnabledStorageKey, ghostAutoEnabled ? "on" : "off");
+    } catch {
+      // ignore localStorage quota/permission failures
+    }
+  }, [ghostAutoEnabled, ghostAutoEnabledStorageKey]);
+
+  const ghostTextShortcutExtension = useMemo(() => {
+    return Extension.create({
+      name: "ghostTextShortcuts",
+      addKeyboardShortcuts() {
+        const canRun = () => {
+          const state = writingShortcutStateRef.current;
+          if (!state) return false;
+          if (state.uiMode !== "writing") return false;
+          if (state.assistantDrawerOpen || state.settingsDialogOpen) return false;
+          if (!state.activeChapterId) return false;
+          if (state.draftLoading || state.draftSaving) return false;
+          return true;
+        };
+
+        return {
+          "Mod-Enter": () => {
+            if (!canRun()) return false;
+            const state = writingShortcutStateRef.current;
+            if (!state?.hasGhostText || state.ghostLoading) return false;
+            acceptGhostTextRef.current?.();
+            return true;
+          },
+          "Mod-Backspace": () => {
+            if (!canRun()) return false;
+            const state = writingShortcutStateRef.current;
+            if (!state?.hasGhostText) return false;
+            rejectGhostTextRef.current?.();
+            return true;
+          },
+          "Mod-Shift-Enter": () => {
+            if (!canRun()) return false;
+            regenerateGhostTextRef.current?.();
+            return true;
+          },
+        };
+      },
+    });
+  }, []);
+
   const typewriterRafRef = useRef<number | null>(null);
   const typewriterModeEnabledRef = useRef(typewriterModeEnabled);
   const typewriterDimmingEnabledRef = useRef(false);
   const activeTypewriterParagraphRef = useRef<HTMLParagraphElement | null>(null);
-  const writingShortcutStateRef = useRef<{
-    uiMode: "writing" | "pro";
-    assistantDrawerOpen: boolean;
-    settingsDialogOpen: boolean;
-    hasGhostText: boolean;
-    ghostLoading: boolean;
-    draftLoading: boolean;
-    draftSaving: boolean;
-    activeChapterId: number | null;
-  }>({
-    uiMode: "writing",
-    assistantDrawerOpen: false,
-    settingsDialogOpen: false,
-    hasGhostText: false,
-    ghostLoading: false,
-    draftLoading: false,
-    draftSaving: false,
-    activeChapterId: null,
-  });
-  const acceptGhostTextRef = useRef<() => void>(() => undefined);
-  const rejectGhostTextRef = useRef<() => void>(() => undefined);
-  const regenerateGhostTextRef = useRef<() => Promise<void>>(async () => undefined);
   const actionLogsCacheRef = useRef<Map<number, ActionAuditLog[]>>(new Map());
   const actionLogsInFlightRef = useRef<Map<number, Promise<ActionAuditLog[]>>>(new Map());
   const actionLogsRequestSeqRef = useRef(0);
@@ -3327,59 +3443,6 @@ export default function App() {
     setTokenUsageSamples([]);
     setRetrievalHitSamples([]);
   }, [projectId]);
-
-  const ghostTextShortcutExtension = useMemo(
-    () =>
-      Extension.create({
-        name: "ghostTextShortcuts",
-        priority: 1000,
-        addKeyboardShortcuts() {
-          const tryAcceptGhost = () => {
-            const shortcutState = writingShortcutStateRef.current;
-            if (shortcutState.uiMode !== "writing") return false;
-            if (shortcutState.assistantDrawerOpen || shortcutState.settingsDialogOpen) return false;
-            if (
-              !shortcutState.hasGhostText ||
-              shortcutState.ghostLoading ||
-              shortcutState.draftLoading ||
-              shortcutState.draftSaving
-            ) {
-              return false;
-            }
-            acceptGhostTextRef.current();
-            return true;
-          };
-          return {
-            Tab: () => tryAcceptGhost(),
-            "Shift-Tab": () => tryAcceptGhost(),
-            Escape: () => {
-              const shortcutState = writingShortcutStateRef.current;
-              if (shortcutState.uiMode !== "writing") return false;
-              if (shortcutState.assistantDrawerOpen || shortcutState.settingsDialogOpen) return false;
-              if (!shortcutState.hasGhostText || shortcutState.ghostLoading) return false;
-              rejectGhostTextRef.current();
-              return true;
-            },
-            "Alt-]": () => {
-              const shortcutState = writingShortcutStateRef.current;
-              if (shortcutState.uiMode !== "writing") return false;
-              if (shortcutState.assistantDrawerOpen || shortcutState.settingsDialogOpen) return false;
-              if (
-                shortcutState.ghostLoading ||
-                shortcutState.draftLoading ||
-                shortcutState.draftSaving ||
-                !shortcutState.activeChapterId
-              ) {
-                return false;
-              }
-              void regenerateGhostTextRef.current();
-              return true;
-            },
-          };
-        },
-      }),
-    []
-  );
 
   const editor = useEditor({
     extensions: [
@@ -3786,57 +3849,12 @@ export default function App() {
     ].join("|");
   };
 
-  const requestGhostSuggestion = async (forceRefresh = false) => {
-    if (!activeChapterId || draftLoading || streaming) return;
-    const prefixText = draftText.trimEnd();
-    if (!prefixText) {
-      setGhostText("");
-      setGhostError(null);
-      return;
-    }
-    const cacheKey = buildGhostCacheKey();
-    if (!forceRefresh && ghostCacheRef.current.has(cacheKey)) {
-      setGhostText(ghostCacheRef.current.get(cacheKey) ?? "");
-      setGhostError(null);
-      setGhostLoading(false);
-      return;
-    }
-
-    const requestId = ghostRequestRef.current + 1;
-    ghostRequestRef.current = requestId;
-    setGhostLoading(true);
+  const requestGhostSuggestion = async (_forceRefresh = false) => {
+    setGhostLoading(false);
+    setGhostText("");
     setGhostError(null);
-    try {
-      const result = await generateGhostText({
-        project_id: projectId,
-        chapter_id: activeChapterId,
-        scene_beat_id: activeSceneBeatId,
-        prompt_template_id: activePromptTemplateId,
-        prefix_text: prefixText.slice(Math.max(0, prefixText.length - 1600)),
-        chapter_goal: ghostChapterGoal || null,
-        active_roles: ghostActiveRoles.length > 0 ? ghostActiveRoles : null,
-        model: model.trim() ? model.trim() : null,
-        model_profile_id: ghostModelProfileId,
-        temperature_profile: ghostTemperatureProfile,
-        temperature_override: temperatureOverride,
-      });
-      if (ghostRequestRef.current !== requestId) return;
-      const nextText = (result.suggestion || "").trim();
-      setGhostText(nextText);
-      if (nextText) {
-        ghostCacheRef.current.set(cacheKey, nextText);
-      }
-    } catch (ghostErr) {
-      if (ghostRequestRef.current !== requestId) return;
-      const message = ghostErr instanceof Error ? ghostErr.message : "Ghost Text 生成失败";
-      setGhostError(message);
-      setGhostText("");
-    } finally {
-      if (ghostRequestRef.current === requestId) {
-        setGhostLoading(false);
-      }
-    }
   };
+
 
   useEffect(() => {
     if (!ghostAutoEnabled) {
@@ -4160,9 +4178,8 @@ export default function App() {
   };
 
   const regenerateGhostText = async () => {
-    const key = buildGhostCacheKey();
-    ghostCacheRef.current.delete(key);
-    await requestGhostSuggestion(true);
+    setGhostText("");
+    setGhostError(null);
   };
   acceptGhostTextRef.current = acceptGhostText;
   rejectGhostTextRef.current = rejectGhostText;
@@ -4186,25 +4203,48 @@ export default function App() {
     const requestId = ghostRequestRef.current + 1;
     ghostRequestRef.current = requestId;
     try {
-      const result = await generateGhostText({
-        project_id: projectId,
-        mode,
-        chapter_id: activeChapterId,
-        scene_beat_id: activeSceneBeatId,
-        prompt_template_id: activePromptTemplateId,
-        text: selectedDraftText,
-        model: model.trim() ? model.trim() : null,
-        model_profile_id: ghostModelProfileId,
-        temperature_profile: "chat",
-        temperature_override: temperatureOverride,
-      });
-      if (ghostRequestRef.current !== requestId) return;
-      setGhostText((result.suggestion || "").trim());
+      const result =
+        mode === "expand"
+          ? await generateGhostExpand({
+              project_id: projectId,
+              chapter_id: activeChapterId,
+              scene_beat_id: activeSceneBeatId,
+              prompt_template_id: activePromptTemplateId,
+              text: selectedDraftText,
+              model: model.trim() ? model.trim() : null,
+              model_profile_id: ghostModelProfileId,
+              temperature_profile: "chat",
+              temperature_override: temperatureOverride,
+            })
+          : await generateGhostPolish({
+              project_id: projectId,
+              chapter_id: activeChapterId,
+              scene_beat_id: activeSceneBeatId,
+              prompt_template_id: activePromptTemplateId,
+              text: selectedDraftText,
+              model: model.trim() ? model.trim() : null,
+              model_profile_id: ghostModelProfileId,
+              temperature_profile: "chat",
+              temperature_override: temperatureOverride,
+            });
+      const nextText = (result.suggestion || "").trim();
+      if (!nextText) {
+        setError("润色/扩写未返回可用内容");
+        return;
+      }
+      if (!editor) {
+        setError("编辑器不可用，暂无法应用结果");
+        return;
+      }
+      const { from, to } = editor.state.selection;
+      const insertionContent = toEditorDoc(nextText).content ?? [];
+      editor.chain().focus().insertContentAt({ from, to }, insertionContent).run();
+      setDraftText(readEditorText(editor));
+      setSelectedDraftText("");
     } catch (rewriteError) {
       if (ghostRequestRef.current !== requestId) return;
       const message = rewriteError instanceof Error ? rewriteError.message : "润色/扩写失败";
       setGhostError(message);
-      setGhostText("");
       setError(message);
     } finally {
       if (ghostRequestRef.current === requestId) {
@@ -5394,15 +5434,6 @@ export default function App() {
             uiMode={uiMode}
             draftEditorRef={draftEditorRef}
             editor={editor}
-            ghostLoading={ghostLoading}
-            ghostText={ghostText}
-            ghostError={ghostError}
-            ghostAutoEnabled={ghostAutoEnabled}
-            onRequestGhostSuggestion={requestGhostSuggestion}
-            onAcceptGhostText={acceptGhostText}
-            onRejectGhostText={rejectGhostText}
-            onRegenerateGhostText={regenerateGhostText}
-            onToggleGhostAuto={toggleGhostAuto}
             onSaveDraftSnapshot={saveDraftSnapshot}
             onRefreshDraftSnapshot={refreshDraftSnapshot}
             projectId={projectId}

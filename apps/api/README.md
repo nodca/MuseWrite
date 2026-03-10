@@ -9,6 +9,34 @@ uvicorn app.main:app --reload --port 8000
 python -m app.worker
 ```
 
+## Docker 运行模式
+
+本目录现在有两种 Docker 形态：
+
+### 1) 本地开发版
+
+- 使用仓库根的 `docker-compose.yml`
+- 默认通过 volume 挂载宿主机 ONNX 模型目录：`./apps/api/models:/app/models:ro`
+- `Dockerfile` 默认不做本地 ONNX 导出，也不把 `models/` 打进镜像
+- 优点：CPU 场景更友好、构建更轻、更适合反复改代码
+
+### 2) 交付版
+
+- 使用仓库根的 `docker-compose.delivery.yml`
+- 使用 `apps/api/Dockerfile.delivery`
+- 直接把 `apps/api/models` baked 进镜像，适合离线交付或单机封版部署
+- `api` 与 `worker` 复用同一份 delivery image，避免重复构建同一个大镜像
+
+交付版启动命令：
+
+```bash
+docker compose -f docker-compose.delivery.yml up -d --build
+```
+
+注意：
+- 若 `apps/api/models` 很大，首次 build 会明显更慢，也更吃磁盘。
+- 交付版的目标是“部署方便”，不是“开发迭代最快”。
+
 ## Minimum runtime env (converged)
 
 ```bash
@@ -32,6 +60,8 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=neo4j
 NEO4J_DATABASE=neo4j
+NEO4J_GDS_GRAPH_NAME_PREFIX=novel_ppr
+NEO4J_GDS_REQUIRED=true
 ```
 
 ## Optional strategy toggles (recommended editable surface)
@@ -59,6 +89,7 @@ LANGFUSE_SECRET_KEY=
 Typical profile choices:
 - `local-dev`: 本地优先速度与反馈。
 - `quality-first`: 质量与证据优先（更严格）。
+  - Neo4j 图检索要求 GDS 可用；缺失时 API 启动直接失败，不做静默降级。
 
 Tip:
 - From repo root, you can run `python scripts/init_local_env.py` to generate a random local token and write `.env`.
@@ -72,6 +103,17 @@ Auth note:
 - startup prints `SECURITY WARNING` when unsafe local defaults are detected.
 
 LightRAG 官方 v1.4+ 建议使用 `/query/data` 契约（`status/message/data/metadata`），本项目已优先适配。
+
+Neo4j 运行说明：
+- Docker Compose 默认使用仓库内的 Neo4j GDS 镜像，直接 baked-in 匹配版本的 Graph Data Science（GDS）jar。
+- 当 `NEO4J_ENABLED=true` 且 `NEO4J_GDS_REQUIRED=true` 时，API 启动阶段会执行一次 GDS 能力探测。
+- Neo4j healthcheck 也会执行 `gds.version()`；若 GDS 未安装、未加载或不可调用，启动会直接抛错，避免图检索悄悄退化为低质量模式。
+- 图检索使用命名 projection graph（GDS in-memory graph）并带版本号：
+  - 命名规则：`NEO4J_GDS_GRAPH_NAME_PREFIX + project_id + scope + version`
+  - 同一 `project + scope + version` 直接复用已有图
+  - 图事实写入/删除/状态变更只 bump version，不在写请求内重建
+  - 下一次检索触发懒重建，并清理同 scope 的旧版本图
+  - `scope` 由是否启用时间过滤与 `current_chapter` 决定
 
 `POST /api/chat/stream` now uses structured model output:
 
@@ -97,7 +139,7 @@ Prompt design (NovelForge-inspired, adapted):
   - cards preview
 - Three-way evidence compiler:
   - DSL exact hit
-  - GRAPH fact query (Neo4j adapter with local fallback)
+  - GRAPH fact query (Neo4j adapter, quality-first 场景要求 GDS)
   - semantic recall (LightRAG adapter with local fallback)
 - Action suggestions are validated server-side:
   - only allowed action types

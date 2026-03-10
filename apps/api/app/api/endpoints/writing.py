@@ -38,7 +38,6 @@ async def rewrite_text(
 
     prompt = _build_ghost_user_input(
         payload.mode,
-        prefix_text="",
         source_text=payload.text,
     )
     try:

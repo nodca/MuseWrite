@@ -1209,6 +1209,17 @@ def _cache_set(
             cache.pop(oldest_key, None)
 
 
+def invalidate_graph_retrieval_cache(project_id: int) -> int:
+    prefix = f"p:{int(project_id)}|"
+    removed = 0
+    with _RETRIEVAL_CACHE_LOCK:
+        keys = [key for key in _GRAPH_HITS_CACHE.keys() if key.startswith(prefix)]
+        for key in keys:
+            _GRAPH_HITS_CACHE.pop(key, None)
+            removed += 1
+    return removed
+
+
 def _graph_cache_key(
     project_id: int,
     terms: list[str],
@@ -1258,6 +1269,10 @@ def _submit_graph_future(
         current_chapter=current_chapter,
         raise_on_error=True,
     )
+
+
+def _strict_graph_mode_enabled() -> bool:
+    return bool(settings.neo4j_enabled and getattr(settings, "neo4j_gds_required", False))
 
 
 def _submit_rag_future(
@@ -2229,8 +2244,21 @@ def _build_compression_sections(
     return sections
 
 
-def _context_compression_rerank_bias(source: str) -> float:
+def _context_compression_rerank_bias(source: str, budget_mode: str = "") -> float:
     source_name = str(source or "").strip().upper()
+    mode = str(budget_mode or "").strip().lower()
+
+    _DYNAMIC_BIAS: dict[str, dict[str, float]] = {
+        "action":        {"DSL": 0.15, "GRAPH": 0.04, "RAG": 0.02},
+        "investigation": {"DSL": 0.08, "GRAPH": 0.12, "RAG": 0.06},
+        "world":         {"DSL": 0.10, "GRAPH": 0.06, "RAG": 0.10},
+        "dialogue":      {"DSL": 0.06, "GRAPH": 0.04, "RAG": 0.04},
+    }
+
+    if mode in _DYNAMIC_BIAS:
+        return _DYNAMIC_BIAS[mode].get(source_name, 0.0)
+
+    # fallback: 读静态配置（balanced 或未知 mode）
     if source_name == "DSL":
         return float(settings.context_compression_reranker_dsl_bias)
     if source_name == "GRAPH":
@@ -2518,6 +2546,7 @@ def _call_context_compressor_reranker(
     intent: str,
     lines: list[str],
     max_chars: int,
+    budget_mode: str = "",
     telemetry: dict[str, Any] | None = None,
 ) -> str | None:
     started_at = time.perf_counter()
@@ -2566,7 +2595,7 @@ def _call_context_compressor_reranker(
         dsl_hard_bias = 0.2 if source == "DSL" else 0.0
         adjusted = max(
             0.0,
-            min(base_score + _context_compression_rerank_bias(source) + dsl_hard_bias, 1.5),
+            min(base_score + _context_compression_rerank_bias(source, budget_mode) + dsl_hard_bias, 1.5),
         )
         ranked.append((adjusted, base_score, idx, source, line))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -2623,6 +2652,7 @@ def _build_context_compression(
     dsl_hits: list[dict[str, Any]],
     graph_facts: list[dict[str, Any]],
     semantic_hits: list[dict[str, Any]],
+    budget_mode: str = "",
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     if not settings.context_compression_enabled:
         return None, {"enabled": False, "applied": False, "reason": "disabled"}
@@ -2659,6 +2689,7 @@ def _build_context_compression(
         intent=intent,
         lines=lines,
         max_chars=max_chars,
+        budget_mode=budget_mode,
         telemetry=reranker_telemetry,
     )
     if rerank_summary:
@@ -3127,7 +3158,7 @@ def _run_reflective_followup_retrieval(
         if graph_remote:
             graph_extra.extend(graph_remote[:graph_step_limit])
             graph_remote_hits += len(graph_remote[:graph_step_limit])
-        else:
+        elif not _strict_graph_mode_enabled():
             graph_extra.extend(
                 _build_graph_facts(
                     windowed_retrieval_cards,
@@ -3904,9 +3935,14 @@ def compile_context_bundle(
         graph_circuit_open, graph_circuit_open_remaining = _circuit_breaker_should_short_circuit("graph")
         if graph_circuit_open:
             graph_cache_status = "circuit_open"
-            notes.append(
-                f"Neo4j circuit breaker 已开启（剩余约 {max(int(round(graph_circuit_open_remaining)), 1)}s），已切换本地图谱回退。"
-            )
+            if _strict_graph_mode_enabled():
+                notes.append(
+                    f"Neo4j circuit breaker 已开启（剩余约 {max(int(round(graph_circuit_open_remaining)), 1)}s），strict graph 模式下不再降级到本地图谱。"
+                )
+            else:
+                notes.append(
+                    f"Neo4j circuit breaker 已开启（剩余约 {max(int(round(graph_circuit_open_remaining)), 1)}s），已切换本地图谱回退。"
+                )
         else:
             graph_future = _submit_graph_future(
                 project_id,
@@ -3961,22 +3997,33 @@ def compile_context_bundle(
         graph_facts = _apply_memory_decay(graph_hits_remote)[:graph_limit]
         graph_provider = "neo4j_cache" if graph_cache_status == "hit" else "neo4j"
     else:
-        graph_facts = _apply_memory_decay(
-            _build_graph_facts(
-                windowed_retrieval_cards,
-                windowed_retrieval_settings,
-                graph_anchor,
-                limit=graph_limit,
-            )
-        )[:graph_limit]
-        if graph_circuit_open:
-            graph_provider = "neo4j_circuit_open_local_graph_fallback"
-        elif graph_timed_out:
-            graph_provider = "neo4j_timeout_local_graph_fallback"
-        elif graph_failed:
-            graph_provider = "neo4j_error_local_graph_fallback"
+        if _strict_graph_mode_enabled():
+            graph_facts = []
+            if graph_circuit_open:
+                graph_provider = "neo4j_circuit_open_strict_no_fallback"
+            elif graph_timed_out:
+                graph_provider = "neo4j_timeout_strict_no_fallback"
+            elif graph_failed:
+                graph_provider = "neo4j_error_strict_no_fallback"
+            else:
+                graph_provider = "neo4j_strict_no_fallback"
         else:
-            graph_provider = "local_graph_fallback"
+            graph_facts = _apply_memory_decay(
+                _build_graph_facts(
+                    windowed_retrieval_cards,
+                    windowed_retrieval_settings,
+                    graph_anchor,
+                    limit=graph_limit,
+                )
+            )[:graph_limit]
+            if graph_circuit_open:
+                graph_provider = "neo4j_circuit_open_local_graph_fallback"
+            elif graph_timed_out:
+                graph_provider = "neo4j_timeout_local_graph_fallback"
+            elif graph_failed:
+                graph_provider = "neo4j_error_local_graph_fallback"
+            else:
+                graph_provider = "local_graph_fallback"
 
     rag_short_circuit_enabled, rag_short_circuit_reason = _resolve_rag_short_circuit(
         deterministic_first=deterministic_first,
@@ -4237,6 +4284,7 @@ def compile_context_bundle(
         dsl_hits=dsl_hits,
         graph_facts=graph_facts,
         semantic_hits=semantic_hits,
+        budget_mode=semantic_route.budget_mode,
     )
     context_cache_layers, context_cache_meta = _build_context_cache_layers(
         mode=mode,

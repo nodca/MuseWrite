@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import init_db
+from app.services.runtime_guards import assert_required_runtime_dependencies
 
 logger = logging.getLogger("novel_platform.security")
 
@@ -36,10 +37,15 @@ def _emit_startup_security_notice() -> None:
         )
 
 
+def _assert_required_runtime_dependencies() -> None:
+    assert_required_runtime_dependencies()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
     _emit_startup_security_notice()
+    _assert_required_runtime_dependencies()
     yield
 
 

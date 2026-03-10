@@ -135,22 +135,21 @@ async function installMockChatApi(page: Page, options: MockChatApiOptions = {}):
       return;
     }
 
-    if (path === "/api/chat/ghost-text" && method === "POST") {
+    if (
+      (path === "/api/chat/ghost-text/polish" || path === "/api/chat/ghost-text/expand") &&
+      method === "POST"
+    ) {
       const rawBody = request.postData() ?? "{}";
       const parsedBody = JSON.parse(rawBody) as {
-        mode?: "continue" | "polish" | "expand";
         text?: string;
-        prefix_text?: string;
       };
-      const mode = parsedBody.mode ?? "continue";
-      const base = String(parsedBody.text ?? parsedBody.prefix_text ?? "").slice(0, 20) || "片段";
+      const mode = path.endsWith("/expand") ? "expand" : "polish";
+      const base = String(parsedBody.text ?? "").slice(0, 20) || "片段";
       await fulfillJson(route, {
         suggestion:
           mode === "expand"
             ? `${base}，扩写补充了一层细节与动作。`
-            : mode === "polish"
-              ? `${base}，语句更凝练，情绪更清晰。`
-              : "他停了一瞬，继续向前。",
+            : `${base}，语句更凝练，情绪更清晰。`,
         usage: { provider: "mock", ghost_mode: mode },
       });
       return;

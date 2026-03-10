@@ -901,7 +901,6 @@ def prewarm_neo4j_ppr_projection(
         if driver is not None:
             driver.close()
 
-
 def _rank_ppr_graph_edges(
     rows: list[dict[str, Any]],
     *,

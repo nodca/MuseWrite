@@ -3,7 +3,8 @@
     "allow": [
       "Bash(sort:*)",
       "Bash(find:*)",
-      "Bash(xargs wc:*)"
+      "Bash(xargs wc:*)",
+      "Skill(verify-quality)"
     ]
   }
 }

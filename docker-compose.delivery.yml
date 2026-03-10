@@ -1,26 +1,10 @@
 services:
-  web:
-    build:
-      context: ./apps/web
-      dockerfile: Dockerfile
-      args:
-        VITE_API_BASE: ${VITE_API_BASE:-}
-        VITE_API_TOKEN: ${VITE_API_TOKEN:-local-dev-token}
-    container_name: novel_web
-    ports:
-      - "${WEB_PORT:-8080}:80"
-    depends_on:
-      api:
-        condition: service_started
-    restart: unless-stopped
-
   api:
+    image: novel-platform-api:delivery
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
-      args:
-        PRELOAD_RERANKER_ONNX: ${PRELOAD_RERANKER_ONNX:-false}
-    container_name: novel_api
+      context: .
+      dockerfile: apps/api/Dockerfile.delivery
+    container_name: novel_api_delivery
     environment: &api_worker_common_env
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-novel_platform}
       CONFIG_PROFILE: ${CONFIG_PROFILE:-local-dev}
@@ -66,7 +50,6 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
 
-      # Optional CI / regression overrides (kept for compatibility)
       RAGAS_GATE_ENABLED: ${RAGAS_GATE_ENABLED:-false}
       RAGAS_THRESHOLD: ${RAGAS_THRESHOLD:-0.55}
     ports:
@@ -76,17 +59,14 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-    volumes:
-      - ./apps/api/models:/app/models:ro
     restart: unless-stopped
 
   worker:
+    image: novel-platform-api:delivery
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
-      args:
-        PRELOAD_RERANKER_ONNX: ${PRELOAD_RERANKER_ONNX:-false}
-    container_name: novel_worker
+      context: .
+      dockerfile: apps/api/Dockerfile.delivery
+    container_name: novel_worker_delivery
     command: ["python", "-m", "app.worker"]
     environment:
       <<: *api_worker_common_env
@@ -95,13 +75,11 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-    volumes:
-      - ./apps/api/models:/app/models:ro
     restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
-    container_name: novel_postgres
+    container_name: novel_postgres_delivery
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-novel_platform}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -122,7 +100,7 @@ services:
       args:
         NEO4J_VERSION: ${NEO4J_IMAGE_TAG:-5.26.21-community}
         GDS_VERSION: ${NEO4J_GDS_VERSION:-2.13.7}
-    container_name: novel_neo4j
+    container_name: novel_neo4j_delivery
     image: novel-platform-neo4j-gds:latest
     environment:
       NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-neo4jpassword}
@@ -144,55 +122,7 @@ services:
       retries: 20
     restart: unless-stopped
 
-  embedding-proxy:
-    build:
-      context: ./docker/embedding-proxy
-      dockerfile: Dockerfile
-    container_name: novel_embedding_proxy
-    profiles: ["rag"]
-    environment:
-      EMBEDDING_BASE_URL: ${LIGHTRAG_EMBEDDING_BASE_URL:-https://router.tumuer.me/v1}
-      EMBEDDING_API_KEY: ${LIGHTRAG_EMBEDDING_API_KEY:-}
-      PRIMARY_MODEL: ${LIGHTRAG_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-8B}
-      FALLBACK_MODEL: ${LIGHTRAG_EMBEDDING_FALLBACK_MODEL:-BAAI/bge-m3}
-      PROXY_TIMEOUT: ${LIGHTRAG_EMBEDDING_TIMEOUT:-30}
-    restart: unless-stopped
-
-  lightrag:
-    image: ${LIGHTRAG_IMAGE:-ghcr.io/hkuds/lightrag:latest}
-    container_name: novel_lightrag
-    profiles: ["rag"]
-    environment:
-      OPENAI_API_KEY: ${LIGHTRAG_OPENAI_API_KEY:-}
-      WORKING_DIR: ${LIGHTRAG_WORKING_DIR:-/app/data/rag_storage}
-      INPUT_DIR: ${LIGHTRAG_INPUT_DIR:-/app/data/inputs}
-      TIMEOUT: ${LIGHTRAG_TIMEOUT:-300}
-      LLM_TIMEOUT: ${LIGHTRAG_LLM_TIMEOUT:-180}
-      EMBEDDING_TIMEOUT: ${LIGHTRAG_EMBEDDING_TIMEOUT:-180}
-      LLM_BINDING: ${LIGHTRAG_LLM_BINDING:-openai}
-      LLM_MODEL: ${LIGHTRAG_LLM_MODEL:-Qwen/Qwen3-8B}
-      LLM_BINDING_HOST: ${LIGHTRAG_LLM_BASE_URL:-https://api.siliconflow.cn/v1}
-      LLM_BINDING_API_KEY: ${LIGHTRAG_LLM_API_KEY:-}
-      EMBEDDING_BINDING: openai
-      EMBEDDING_MODEL: ${LIGHTRAG_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-8B}
-      EMBEDDING_DIM: ${LIGHTRAG_EMBEDDING_DIM:-4096}
-      EMBEDDING_BINDING_HOST: http://embedding-proxy:8080
-      EMBEDDING_BINDING_API_KEY: ${LIGHTRAG_EMBEDDING_API_KEY:-}
-      RERANK_BY_DEFAULT: ${LIGHTRAG_RERANK_ENABLED:-true}
-      RERANK_BINDING: ${LIGHTRAG_RERANK_BINDING:-null}
-      RERANK_MODEL: ${LIGHTRAG_RERANK_MODEL:-}
-      RERANK_BINDING_HOST: ${LIGHTRAG_RERANK_BASE_URL:-}
-      RERANK_BINDING_API_KEY: ${LIGHTRAG_RERANK_API_KEY:-}
-    ports:
-      - "${LIGHTRAG_PORT:-9621}:9621"
-    volumes:
-      - lightrag_data:/app/data
-    depends_on:
-      - embedding-proxy
-    restart: unless-stopped
-
 volumes:
   pg_data:
   neo4j_data:
   neo4j_logs:
-  lightrag_data:

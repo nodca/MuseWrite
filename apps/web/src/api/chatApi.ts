@@ -14,7 +14,7 @@ import type {
   GraphCandidateListQuery,
   GraphCandidateListResponse,
   GraphTimelineSnapshot,
-  GhostTextRequest,
+  GhostTextRewriteRequest,
   GhostTextResponse,
   ModelProfile,
   ModelProfileDeleteResult,
@@ -338,8 +338,15 @@ export async function streamChat(
   });
 }
 
-export function generateGhostText(payload: GhostTextRequest): Promise<GhostTextResponse> {
-  return requestJson<GhostTextResponse>("/api/chat/ghost-text", {
+export function generateGhostPolish(payload: GhostTextRewriteRequest): Promise<GhostTextResponse> {
+  return requestJson<GhostTextResponse>("/api/chat/ghost-text/polish", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function generateGhostExpand(payload: GhostTextRewriteRequest): Promise<GhostTextResponse> {
+  return requestJson<GhostTextResponse>("/api/chat/ghost-text/expand", {
     method: "POST",
     body: JSON.stringify(payload),
   });

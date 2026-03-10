@@ -1,11 +1,96 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import uuid4
 
 import httpx
 
 from app.core.config import settings
+
+
+# ---------------------------------------------------------------------------
+# Chunk 预处理：场景分段
+# ---------------------------------------------------------------------------
+
+_SCENE_BREAK_RE = re.compile(
+    r"\n{2,}"           # 两个以上连续换行
+    r"|(?=^第.{1,6}[章节幕回])"  # 章/节/幕/回 标题
+    r"|(?=^[＊\*]{3,})" # *** 分隔符
+    r"|(?=^[—–]{3,})"   # --- 分隔符
+    r"|(?=^#{1,3}\s)",   # markdown 标题
+    re.MULTILINE,
+)
+
+_CHUNK_TARGET = 2000   # 目标合并长度（字符）
+_CHUNK_OVERLAP = 200   # 段落间 overlap
+
+
+def _split_into_scenes(text: str) -> list[str]:
+    """按场景边界分割文本。"""
+    raw_parts = _SCENE_BREAK_RE.split(text)
+    return [p.strip() for p in raw_parts if p and p.strip()]
+
+
+def _merge_scenes(
+    parts: list[str],
+    target: int = _CHUNK_TARGET,
+    overlap: int = _CHUNK_OVERLAP,
+) -> list[str]:
+    """相邻段落合并至 target 字符，段落间保留 overlap 重叠。"""
+    if not parts:
+        return []
+    chunks: list[str] = []
+    buf = parts[0]
+    for part in parts[1:]:
+        if len(buf) + len(part) + 1 <= target:
+            buf = buf + "\n\n" + part
+        else:
+            chunks.append(buf)
+            # overlap：取上一段末尾
+            tail = buf[-overlap:] if len(buf) > overlap else buf
+            buf = tail + "\n\n" + part
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def chunk_text_by_scene(
+    text: str,
+    *,
+    target: int = _CHUNK_TARGET,
+    overlap: int = _CHUNK_OVERLAP,
+) -> list[str]:
+    """公共接口：将长文本按场景分段并合并。"""
+    if not text or not text.strip():
+        return []
+    scenes = _split_into_scenes(text.strip())
+    if not scenes:
+        return [text.strip()[:target]]
+    return _merge_scenes(scenes, target=target, overlap=overlap)
+
+
+# ---------------------------------------------------------------------------
+# StoryCard 结构化展平
+# ---------------------------------------------------------------------------
+
+def flatten_storycard_for_index(
+    title: str,
+    content: dict[str, Any],
+    *,
+    aliases: list[str] | None = None,
+) -> str:
+    """将 StoryCard 的 JSON content 展平为可索引文本。"""
+    parts: list[str] = [f"角色：{title}"]
+    if aliases:
+        parts.append(f"别名：{'、'.join(aliases)}")
+    if isinstance(content, dict):
+        for k, v in content.items():
+            if v:
+                parts.append(f"{k}：{v}")
+    elif isinstance(content, str):
+        parts.append(content)
+    return "\n".join(parts)
 
 
 def _ensure_lightrag_enabled() -> None:
@@ -116,6 +201,7 @@ def insert_text_document(
     project_id: int,
     text: str,
     file_source: str | None = None,
+    enable_scene_chunking: bool = True,
 ) -> dict[str, Any]:
     content = (text or "").strip()
     if not content:
@@ -124,15 +210,55 @@ def insert_text_document(
     if not source:
         source = f"{_project_source_prefix(project_id)}manual-{uuid4().hex[:12]}.txt"
 
+    if enable_scene_chunking and len(content) > _CHUNK_TARGET:
+        chunks = chunk_text_by_scene(content)
+    else:
+        chunks = [content]
+
+    results: list[dict[str, Any]] = []
+    for idx, chunk in enumerate(chunks):
+        chunk_source = f"{source}#chunk-{idx}" if len(chunks) > 1 else source
+        payload = _request_json(
+            "POST",
+            path=settings.lightrag_documents_text_path,
+            fallback_path="/documents/text",
+            json_body={"text": chunk, "file_source": chunk_source},
+        )
+        results.append(payload)
+
+    return {
+        "provider": "lightrag_native",
+        "project_id": int(project_id),
+        "file_source": source,
+        "chunk_count": len(chunks),
+        "result": results[0] if len(results) == 1 else results,
+    }
+
+
+def insert_storycard_document(
+    *,
+    project_id: int,
+    card_id: int,
+    title: str,
+    content: dict[str, Any],
+    aliases: list[str] | None = None,
+) -> dict[str, Any]:
+    """将 StoryCard 以结构化文本送入 LightRAG 索引。"""
+    flat_text = flatten_storycard_for_index(title, content, aliases=aliases)
+    if not flat_text.strip():
+        raise ValueError("storycard content is empty")
+    source = f"{_project_source_prefix(project_id)}card-{int(card_id)}.txt"
+
     payload = _request_json(
         "POST",
         path=settings.lightrag_documents_text_path,
         fallback_path="/documents/text",
-        json_body={"text": content, "file_source": source},
+        json_body={"text": flat_text, "file_source": source},
     )
     return {
         "provider": "lightrag_native",
         "project_id": int(project_id),
+        "card_id": int(card_id),
         "file_source": source,
         "result": payload,
     }

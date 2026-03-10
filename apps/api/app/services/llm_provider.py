@@ -652,6 +652,27 @@ def _extract_json_content(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _strip_reasoning_content(text: str) -> str:
+    content = str(text or "")
+    if not content:
+        return ""
+
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", content, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<thinking>[\s\S]*?</thinking>", "", cleaned, flags=re.IGNORECASE)
+
+    marker_patterns = [
+        r"^\s*Thinking Process:\s*\n",
+        r"^\s*思考过程[:：]\s*\n",
+    ]
+    for marker in marker_patterns:
+        if re.search(marker, cleaned, flags=re.IGNORECASE):
+            chunks = re.split(r"\n\s*\n", cleaned)
+            cleaned = chunks[-1] if chunks else cleaned
+            break
+
+    return cleaned.strip()
+
+
 def _normalize_tot_branches(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
@@ -1043,6 +1064,9 @@ async def _generate_openai_compatible(
         "response_format": {"type": "json_object"},
         "max_tokens": int(settings.llm_max_output_tokens),
     }
+    if not bool(thinking_enabled):
+        body["enable_thinking"] = False
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     if prompt_cache_key:
         body["prompt_cache_key"] = prompt_cache_key
 
@@ -1077,11 +1101,13 @@ async def _generate_openai_compatible(
             else:
                 raise
 
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    content_raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    content = _strip_reasoning_content(content_raw)
     parsed = _extract_json_content(content)
     if not parsed:
+        fallback_text = content or str(content_raw or "")
         return ChatGenerationResult(
-            assistant_text=content or "模型返回为空",
+            assistant_text=fallback_text or "模型返回为空",
             proposed_actions=[],
             usage={
                 "provider": provider_name,
@@ -1091,6 +1117,7 @@ async def _generate_openai_compatible(
         )
 
     assistant_text = str(parsed.get("assistant_text", "")).strip() or "好的，我已处理你的请求。"
+    assistant_text = _strip_reasoning_content(assistant_text)
     actions = _validate_actions(parsed.get("proposed_actions", []))
     usage_raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     prompt_details = usage_raw.get("prompt_tokens_details") if isinstance(usage_raw.get("prompt_tokens_details"), dict) else {}

@@ -97,6 +97,15 @@ class SettingsContractTestCase(unittest.TestCase):
                 f"unknown attr set on {module_name} proxy must not leak to root settings",
             )
 
+    def test_runtime_contract_exposes_neo4j_gds_fields(self) -> None:
+        for field_name in ("neo4j_gds_required", "neo4j_gds_min_version"):
+            self.assertIn(field_name, RuntimeSettings.FIELD_NAMES)
+            self.assertEqual(
+                getattr(settings.runtime, field_name),
+                getattr(settings, field_name),
+                f"runtime.{field_name} should read from root settings",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

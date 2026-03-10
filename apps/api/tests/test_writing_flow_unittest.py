@@ -69,6 +69,59 @@ class WritingFlowTestCase(unittest.TestCase):
         SQLModel.metadata.drop_all(self.engine)
         self.engine.dispose()
 
+    def _list_gds_graphs(self, prefix: str) -> list[str]:
+        graph_db = retrieval_adapters_module.GraphDatabase
+        if graph_db is None:
+            return []
+        driver = None
+        try:
+            driver = graph_db.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_username, settings.neo4j_password),
+            )
+            with driver.session(database=settings.neo4j_database or None) as session:
+                row = session.run(
+                    """
+                    CALL gds.graph.list()
+                    YIELD graphName
+                    WHERE graphName STARTS WITH $prefix
+                    RETURN collect(graphName) AS graph_names
+                    """,
+                    prefix=prefix,
+                ).single()
+                graph_names = row.get("graph_names") if row is not None else []
+                if not isinstance(graph_names, list):
+                    return []
+                return sorted(str(item) for item in graph_names if str(item).strip())
+        except Exception:
+            return []
+        finally:
+            if driver is not None:
+                driver.close()
+
+    def _drop_gds_graphs(self, prefix: str) -> None:
+        graph_db = retrieval_adapters_module.GraphDatabase
+        if graph_db is None:
+            return
+        driver = None
+        try:
+            driver = graph_db.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_username, settings.neo4j_password),
+            )
+            with driver.session(database=settings.neo4j_database or None) as session:
+                graph_names = self._list_gds_graphs(prefix)
+                for graph_name in graph_names:
+                    session.run(
+                        "CALL gds.graph.drop($graph_name, false) YIELD graphName RETURN graphName",
+                        graph_name=graph_name,
+                    ).single()
+        except Exception:
+            return
+        finally:
+            if driver is not None:
+                driver.close()
+
     def test_chapter_crud_and_rollback(self) -> None:
         with Session(self.engine) as db:
             chapters = list_project_chapters(db, 1)
@@ -663,6 +716,8 @@ class WritingFlowTestCase(unittest.TestCase):
         original_rag_open = settings.retrieval_rag_cb_open_seconds
         original_parallel = settings.retrieval_parallel_enabled
         original_deterministic_short = settings.deterministic_short_circuit_enabled
+        original_neo4j_enabled = settings.neo4j_enabled
+        original_neo4j_gds_required = settings.neo4j_gds_required
         project_id = 404
 
         def _failed_future() -> Future[list[dict]]:
@@ -680,6 +735,8 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.retrieval_rag_cb_open_seconds = 120.0
             settings.retrieval_parallel_enabled = False
             settings.deterministic_short_circuit_enabled = False
+            settings.neo4j_enabled = True
+            settings.neo4j_gds_required = True
 
             for key in ("graph", "rag"):
                 state = context_compiler_module._RETRIEVAL_CIRCUIT_BREAKERS[key]
@@ -699,6 +756,16 @@ class WritingFlowTestCase(unittest.TestCase):
                 ), mock.patch(
                     "app.services.context_compiler._submit_rag_future",
                     side_effect=lambda *args, **kwargs: _failed_future(),
+                ), mock.patch(
+                    "app.services.context_compiler._build_graph_facts",
+                    return_value=[
+                        {
+                            "kind": "graph_edge",
+                            "id": 999,
+                            "title": "本地回退命中",
+                            "fact": "这条结果不该在 strict graph 模式出现",
+                        }
+                    ],
                 ):
                     first = compile_context_bundle(
                         db,
@@ -733,10 +800,12 @@ class WritingFlowTestCase(unittest.TestCase):
 
             first_providers = first.model_context.get("evidence", {}).get("providers", {})
             second_providers = second.model_context.get("evidence", {}).get("providers", {})
-            self.assertEqual(first_providers.get("graph"), "neo4j_error_local_graph_fallback")
+            self.assertEqual(first_providers.get("graph"), "neo4j_error_strict_no_fallback")
             self.assertEqual(first_providers.get("rag"), "lightrag_error_local_semantic_fallback")
-            self.assertEqual(second_providers.get("graph"), "neo4j_circuit_open_local_graph_fallback")
+            self.assertEqual(second_providers.get("graph"), "neo4j_circuit_open_strict_no_fallback")
             self.assertEqual(second_providers.get("rag"), "lightrag_circuit_open_local_semantic_fallback")
+            self.assertEqual(first.model_context.get("evidence", {}).get("graph_facts", []), [])
+            self.assertEqual(second.model_context.get("evidence", {}).get("graph_facts", []), [])
 
             notes = second.evidence_event.get("policy", {}).get("notes", [])
             self.assertTrue(any("circuit breaker" in str(item).lower() for item in notes))
@@ -764,6 +833,8 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.retrieval_rag_cb_open_seconds = original_rag_open
             settings.retrieval_parallel_enabled = original_parallel
             settings.deterministic_short_circuit_enabled = original_deterministic_short
+            settings.neo4j_enabled = original_neo4j_enabled
+            settings.neo4j_gds_required = original_neo4j_gds_required
 
     def test_context_compiler_rerank_mode_prefers_local_reranker(self) -> None:
         original_router_enabled = settings.semantic_router_enabled
@@ -1833,6 +1904,244 @@ class WritingFlowTestCase(unittest.TestCase):
             context_rows = retrieval_runtime.get("context_rows", {})
             self.assertGreaterEqual(int(context_rows.get("retrieval_settings", 0)), 2)
             self.assertGreaterEqual(int(context_rows.get("retrieval_cards", 0)), 2)
+
+    def test_context_compiler_real_neo4j_ppr_recovers_long_range_ring_clue(self) -> None:
+        original_neo4j_enabled = settings.neo4j_enabled
+        original_neo4j_uri = settings.neo4j_uri
+        original_neo4j_username = settings.neo4j_username
+        original_neo4j_password = settings.neo4j_password
+        original_neo4j_database = settings.neo4j_database
+        original_neo4j_gds_required = settings.neo4j_gds_required
+        original_neo4j_gds_graph_name_prefix = settings.neo4j_gds_graph_name_prefix
+        original_lightrag_enabled = settings.lightrag_enabled
+        original_parallel = settings.retrieval_parallel_enabled
+        project_id = 9047
+        cleanup_sources = ["戒指", "废宅"]
+        fact_keys: list[str] = []
+
+        try:
+            settings.neo4j_enabled = True
+            settings.neo4j_uri = "bolt://localhost:7687"
+            settings.neo4j_username = "neo4j"
+            settings.neo4j_password = "neo4jpassword"
+            settings.neo4j_database = "neo4j"
+            settings.neo4j_gds_required = True
+            settings.neo4j_gds_graph_name_prefix = "novel_ppr"
+            settings.lightrag_enabled = False
+            settings.retrieval_parallel_enabled = False
+
+            for key in ("graph", "rag"):
+                state = context_compiler_module._RETRIEVAL_CIRCUIT_BREAKERS[key]
+                state["failures"].clear()
+                state["open_until"] = 0.0
+                state["opened_count"] = 0
+
+            probe = retrieval_adapters_module.ensure_neo4j_gds_available()
+            if probe.get("status") != "ok":
+                self.skipTest(f"Neo4j GDS unavailable for integration test: {probe}")
+
+            retrieval_adapters_module.delete_neo4j_graph_facts_by_sources(
+                project_id,
+                cleanup_sources,
+                hard_delete=True,
+            )
+
+            chapter3_keys = retrieval_adapters_module.upsert_neo4j_graph_facts(
+                project_id,
+                [
+                    make_graph_candidate("戒指", "GIVEN_BY", "角色A", evidence="第3章：角色A把戒指送出。", confidence=0.98),
+                    make_graph_candidate("戒指", "PASSED_TO", "角色B", evidence="第3章：这枚戒指落到角色B手中。", confidence=0.96),
+                ],
+                state="confirmed",
+                source_ref="integration:ppr:chapter3",
+                current_chapter=3,
+            )
+            chapter47_keys = retrieval_adapters_module.upsert_neo4j_graph_facts(
+                project_id,
+                [
+                    make_graph_candidate("戒指", "HIDDEN_AT", "废宅", evidence="第47章：戒指出现在废宅。", confidence=0.97),
+                    make_graph_candidate("废宅", "DISCOVERED_BY", "角色C", evidence="第47章：角色C在废宅发现线索。", confidence=0.95),
+                ],
+                state="confirmed",
+                source_ref="integration:ppr:chapter47",
+                current_chapter=47,
+            )
+            fact_keys = [*chapter3_keys, *chapter47_keys]
+            self.assertGreaterEqual(len(fact_keys), 4)
+
+            with Session(self.engine) as db:
+                session = ChatSession(project_id=project_id, user_id="tester", title="PPR 集成测试")
+                db.add(session)
+                db.commit()
+                db.refresh(session)
+
+                compiled = compile_context_bundle(
+                    db,
+                    session_id=int(session.id or 0),
+                    project_id=project_id,
+                    chapter_id=None,
+                    scene_beat_id=None,
+                    prompt_template_id=None,
+                    user_input="戒指 废宅 角色C 这枚戒指和前面谁送出的有关？",
+                    pov_mode="global",
+                    pov_anchor=None,
+                    rag_mode_override="mix",
+                    deterministic_first=False,
+                    thinking_enabled=False,
+                    reference_project_ids=[],
+                )
+
+            evidence = compiled.model_context.get("evidence", {})
+            providers = evidence.get("providers", {})
+            graph_facts = evidence.get("graph_facts", [])
+            fact_texts = [str(item.get("fact") or "") for item in graph_facts if isinstance(item, dict)]
+
+            self.assertIn(providers.get("graph"), {"neo4j", "neo4j_cache"})
+            self.assertGreaterEqual(len(graph_facts), 2)
+            self.assertTrue(any("角色A" in text and "戒指" in text for text in fact_texts))
+            self.assertTrue(any("废宅" in text and "角色C" in text for text in fact_texts))
+        finally:
+            retrieval_adapters_module.delete_neo4j_graph_facts_by_sources(
+                project_id,
+                cleanup_sources,
+                hard_delete=True,
+            )
+            if fact_keys:
+                retrieval_adapters_module.delete_neo4j_graph_facts(
+                    project_id,
+                    fact_keys,
+                    hard_delete=True,
+                )
+            settings.neo4j_enabled = original_neo4j_enabled
+            settings.neo4j_uri = original_neo4j_uri
+            settings.neo4j_username = original_neo4j_username
+            settings.neo4j_password = original_neo4j_password
+            settings.neo4j_database = original_neo4j_database
+            settings.neo4j_gds_required = original_neo4j_gds_required
+            settings.neo4j_gds_graph_name_prefix = original_neo4j_gds_graph_name_prefix
+            settings.lightrag_enabled = original_lightrag_enabled
+            settings.retrieval_parallel_enabled = original_parallel
+
+    def test_named_projection_reuses_and_rebuilds_after_graph_mutation(self) -> None:
+        original_neo4j_enabled = settings.neo4j_enabled
+        original_neo4j_uri = settings.neo4j_uri
+        original_neo4j_username = settings.neo4j_username
+        original_neo4j_password = settings.neo4j_password
+        original_neo4j_database = settings.neo4j_database
+        original_neo4j_gds_required = settings.neo4j_gds_required
+        original_neo4j_gds_graph_name_prefix = settings.neo4j_gds_graph_name_prefix
+        project_id = 9157
+        cleanup_sources = ["戒指", "废宅"]
+        fact_keys: list[str] = []
+        prefix = ""
+
+        try:
+            settings.neo4j_enabled = True
+            settings.neo4j_uri = "bolt://localhost:7687"
+            settings.neo4j_username = "neo4j"
+            settings.neo4j_password = "neo4jpassword"
+            settings.neo4j_database = "neo4j"
+            settings.neo4j_gds_required = True
+            settings.neo4j_gds_graph_name_prefix = "novel_ppr_it"
+
+            probe = retrieval_adapters_module.ensure_neo4j_gds_available()
+            if probe.get("status") != "ok":
+                self.skipTest(f"Neo4j GDS unavailable for integration test: {probe}")
+
+            prefix = f"{settings.neo4j_gds_graph_name_prefix}_{project_id}_chapter_47_v"
+            self._drop_gds_graphs(prefix)
+            retrieval_adapters_module.delete_neo4j_graph_facts_by_sources(
+                project_id,
+                cleanup_sources,
+                hard_delete=True,
+            )
+
+            fact_keys.extend(
+                retrieval_adapters_module.upsert_neo4j_graph_facts(
+                    project_id,
+                    [
+                        make_graph_candidate("戒指", "GIVEN_BY", "角色A", evidence="第3章：角色A把戒指送出。", confidence=0.98),
+                        make_graph_candidate("戒指", "HIDDEN_AT", "废宅", evidence="第47章：戒指出现在废宅。", confidence=0.97),
+                    ],
+                    state="confirmed",
+                    source_ref="integration:named-projection:base",
+                    current_chapter=47,
+                )
+            )
+
+            hits_first = retrieval_adapters_module.fetch_neo4j_graph_facts(
+                project_id,
+                ["戒指", "废宅"],
+                anchor="戒指",
+                limit=8,
+                current_chapter=47,
+                raise_on_error=True,
+            )
+            graph_names_first = self._list_gds_graphs(prefix)
+            first_facts = [str(item.get("fact") or "") for item in hits_first if isinstance(item, dict)]
+
+            hits_second = retrieval_adapters_module.fetch_neo4j_graph_facts(
+                project_id,
+                ["戒指", "废宅"],
+                anchor="戒指",
+                limit=8,
+                current_chapter=47,
+                raise_on_error=True,
+            )
+            graph_names_second = self._list_gds_graphs(prefix)
+
+            fact_keys.extend(
+                retrieval_adapters_module.upsert_neo4j_graph_facts(
+                    project_id,
+                    [
+                        make_graph_candidate("废宅", "DISCOVERED_BY", "角色C", evidence="第47章：角色C在废宅发现线索。", confidence=0.95),
+                    ],
+                    state="confirmed",
+                    source_ref="integration:named-projection:delta",
+                    current_chapter=47,
+                )
+            )
+
+            hits_third = retrieval_adapters_module.fetch_neo4j_graph_facts(
+                project_id,
+                ["戒指", "废宅", "角色C"],
+                anchor="戒指",
+                limit=8,
+                current_chapter=47,
+                raise_on_error=True,
+            )
+            graph_names_third = self._list_gds_graphs(prefix)
+            third_facts = [str(item.get("fact") or "") for item in hits_third if isinstance(item, dict)]
+
+            self.assertGreaterEqual(len(hits_first), 1)
+            self.assertEqual(graph_names_first, graph_names_second)
+            self.assertEqual(len(graph_names_first), 1)
+            self.assertFalse(any("角色C" in text for text in first_facts))
+            self.assertGreaterEqual(len(hits_second), 1)
+            self.assertEqual(len(graph_names_third), 1)
+            self.assertNotEqual(graph_names_first[0], graph_names_third[0])
+            self.assertTrue(any("废宅" in text and "角色C" in text for text in third_facts))
+        finally:
+            if prefix:
+                self._drop_gds_graphs(prefix)
+            retrieval_adapters_module.delete_neo4j_graph_facts_by_sources(
+                project_id,
+                cleanup_sources,
+                hard_delete=True,
+            )
+            if fact_keys:
+                retrieval_adapters_module.delete_neo4j_graph_facts(
+                    project_id,
+                    fact_keys,
+                    hard_delete=True,
+                )
+            settings.neo4j_enabled = original_neo4j_enabled
+            settings.neo4j_uri = original_neo4j_uri
+            settings.neo4j_username = original_neo4j_username
+            settings.neo4j_password = original_neo4j_password
+            settings.neo4j_database = original_neo4j_database
+            settings.neo4j_gds_required = original_neo4j_gds_required
+            settings.neo4j_gds_graph_name_prefix = original_neo4j_gds_graph_name_prefix
 
     def test_volume_memory_consolidation_writes_semantic_setting(self) -> None:
         original_enabled = settings.memory_consolidation_enabled
