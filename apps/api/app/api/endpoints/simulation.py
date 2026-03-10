@@ -12,6 +12,7 @@ from app.core.auth import AuthPrincipal, get_current_principal
 from app.core.database import get_session
 from app.core.sse import sse_event
 from app.models.simulation import SimulationSession, SimulationTurn
+from app.services.simulation import run_turn
 from app.services.simulation_service import (
     create_simulation_session,
     delete_simulation_session,
@@ -20,7 +21,6 @@ from app.services.simulation_service import (
     inject_event,
     interview_character,
     list_simulation_sessions,
-    run_one_turn,
 )
 from .chat_helpers import ensure_project_scope_access as _ensure_project
 
@@ -49,7 +49,6 @@ class SimulationSessionRead(BaseModel):
     setting_keys: list[str]
     max_turns: int
     status: str
-    pending_events: list[str]
 
     model_config = {"from_attributes": True}
 
@@ -124,7 +123,7 @@ def list_sessions(
 
 
 @router.get("/sessions/{session_id}", response_model=SimulationSessionDetail)
-def get_session(
+def get_session_detail(
     session_id: int,
     db: Session = Depends(get_session),
     principal: AuthPrincipal = Depends(get_current_principal),
@@ -235,32 +234,48 @@ async def run_simulation(
 
         turns = get_simulation_turns(db, session_id)
         completed = len([t for t in turns if not t.is_injected_event])
-        remaining = sim.max_turns - completed
 
         try:
-            for _ in range(max(remaining, 0)):
+            while completed < sim.max_turns:
                 sim = get_simulation_session(db, session_id)
                 if sim.status != "running":
                     break
-                turn = await run_one_turn(
+                outcome, turn = await run_turn(
                     db,
-                    sim,
+                    sim=sim,
                     current_chapter=payload.current_chapter,
                 )
+                if outcome.status == "spoken" and turn is not None:
+                    completed += 1
+                    yield sse_event({
+                        "type": "turn",
+                        "turn": {
+                            "id": turn.id,
+                            "turn_index": turn.turn_index,
+                            "actor_card_id": turn.actor_card_id,
+                            "actor_name": turn.actor_name,
+                            "action_type": turn.action_type,
+                            "content": turn.content,
+                            "emotion": turn.emotion,
+                            "is_injected_event": turn.is_injected_event,
+                        },
+                    })
+                    continue
+                if outcome.status == "paused":
+                    yield sse_event({
+                        "type": "paused",
+                        "turn_index": outcome.turn_index,
+                    })
+                    break
                 yield sse_event({
-                    "type": "turn",
-                    "turn": {
-                        "id": turn.id,
-                        "turn_index": turn.turn_index,
-                        "actor_card_id": turn.actor_card_id,
-                        "actor_name": turn.actor_name,
-                        "action_type": turn.action_type,
-                        "content": turn.content,
-                        "emotion": turn.emotion,
-                        "is_injected_event": turn.is_injected_event,
-                    },
+                    "type": "error",
+                    "detail": outcome.error_code or "simulation turn failed",
+                    "turn_index": outcome.turn_index,
+                    "error_code": outcome.error_code,
+                    "details": outcome.details,
                 })
-            yield sse_event({"type": "done"})
+                break
+            yield sse_event({"type": "done", "completed": completed})
         except Exception as exc:
             yield sse_event({"type": "error", "detail": str(exc)})
         finally:
