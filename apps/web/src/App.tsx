@@ -4,6 +4,8 @@ import Placeholder from "@tiptap/extension-placeholder";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { buildDiffSuggestions, SemanticDiffExtension } from "./components/editor/extensions/DiffExtension";
+import { GhostTextExtension } from "./components/editor/extensions/GhostTextExtension";
 import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { FixedSizeList, type ListChildComponentProps } from "react-window";
@@ -22,6 +24,8 @@ import {
   decideAction,
   generateGhostPolish,
   generateGhostExpand,
+  openGhostTextSocket,
+  sendGhostTextStreamRequest,
   getActionLogs,
   getForeshadowingCards,
   getProjectConsistencyAudits,
@@ -59,6 +63,14 @@ import {
 import { useChatStore } from "./store/chatStore";
 import { ModeSwitch } from "./components/ModeSwitch";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ContextXRayMessage } from "./components/chat/ContextXRayMessage";
+import {
+  extractAliasesFromRecord,
+  extractNameCandidatesFromRecord,
+  normalizeEntityToken,
+  summarizeKnowledgeSnippet,
+} from "./components/chat/contextXRay";
+import { toUiMessage } from "./components/chat/messageMapping";
 import type { WorkbenchPanelVisibility } from "./components/ProWorkspaceMode";
 import {
   clearDraftRecoverySnapshot,
@@ -76,6 +88,8 @@ import type {
   DraftAutoSaveState,
   EvidencePayload,
   ForeshadowingCard,
+  GhostTextStreamEvent,
+  GraphBlastRadiusPreview,
   GraphTimelineSnapshot,
   ChatSessionSummary,
   ProjectChapter,
@@ -93,6 +107,8 @@ import type {
 type PostChatSnapshotData = {
   messagesData: Awaited<ReturnType<typeof getSessionMessages>>;
   actionsData: Awaited<ReturnType<typeof getSessionActions>>;
+  settingsData: Awaited<ReturnType<typeof getProjectSettings>>;
+  cardsData: Awaited<ReturnType<typeof getProjectCards>>;
   sessionsData: ChatSessionSummary[];
 };
 
@@ -165,18 +181,6 @@ const ACTION_FLOW_GUIDE_SEEN_KEY = "novel-platform:action-flow-guide:seen:v1";
 const PERFORMANCE_SAMPLE_LIMIT = 60;
 type WritingTheme = "paper" | "wenkai" | "modern" | "contrast";
 
-function toUiMessage(message: {
-  id: number;
-  role: "user" | "assistant" | "system";
-  content: string;
-}): UiMessage {
-  return {
-    id: `msg-${message.id}`,
-    role: message.role,
-    content: message.content,
-  };
-}
-
 function formatRole(role: UiMessage["role"]): string {
   if (role === "user") return "你";
   if (role === "assistant") return "助手";
@@ -239,6 +243,13 @@ function normalizeEditorText(value: string): string {
   return normalized;
 }
 
+function takeGhostWord(value: string): string {
+  const normalized = String(value || "");
+  if (!normalized.trim()) return "";
+  const match = normalized.match(/^\s*\S+\s*/);
+  return match ? match[0] : normalized;
+}
+
 function toEditorDoc(text: string): JSONContent {
   const normalized = normalizeEditorText(text);
   const lines = normalized.length > 0 ? normalized.split("\n") : [""];
@@ -290,93 +301,7 @@ type EntityHintPluginState = {
 };
 
 const ENTITY_HINT_LIMIT = 120;
-const ENTITY_ALIAS_FIELD_KEYS = new Set([
-  "alias",
-  "aliases",
-  "aka",
-  "别名",
-  "称呼",
-  "曾用名",
-  "外号",
-  "昵称",
-  "简称",
-]);
-const ENTITY_NAME_FIELD_KEYS = new Set(["name", "title", "名称", "姓名", "角色名", "实体名"]);
 const entityHintPluginKey = new PluginKey<EntityHintPluginState>("entity-inline-hints");
-
-function normalizeEntityToken(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[^\w\u4e00-\u9fff·-]/g, "");
-}
-
-function summarizeKnowledgeSnippet(value: unknown, maxLength = 64): string {
-  let raw = "";
-  if (typeof value === "string") {
-    raw = value;
-  } else if (value === null || value === undefined) {
-    raw = "";
-  } else {
-    raw = formatJson(value);
-  }
-  const normalized = raw.replace(/\s+/g, " ").trim();
-  if (!normalized) return "";
-  if (normalized.length <= maxLength) return normalized;
-  return `${normalized.slice(0, maxLength).trimEnd()}...`;
-}
-
-function splitAliasText(value: string): string[] {
-  return value
-    .split(/[,\s，、;；|/]+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-}
-
-function flattenAliasValues(value: unknown, depth = 0): string[] {
-  if (depth > 2) return [];
-  if (typeof value === "string") return splitAliasText(value);
-  if (typeof value === "number" || typeof value === "boolean") return [String(value)];
-  if (Array.isArray(value)) {
-    const values: string[] = [];
-    value.forEach((item) => values.push(...flattenAliasValues(item, depth + 1)));
-    return values;
-  }
-  if (value && typeof value === "object") {
-    const values: string[] = [];
-    Object.values(value as Record<string, unknown>).forEach((item) => {
-      values.push(...flattenAliasValues(item, depth + 1));
-    });
-    return values;
-  }
-  return [];
-}
-
-function extractAliasesFromRecord(record: Record<string, unknown>): string[] {
-  const aliases: string[] = [];
-  Object.entries(record).forEach(([key, value]) => {
-    const normalizedKey = key.trim().toLowerCase();
-    if (ENTITY_ALIAS_FIELD_KEYS.has(key.trim()) || ENTITY_ALIAS_FIELD_KEYS.has(normalizedKey)) {
-      aliases.push(...flattenAliasValues(value));
-    }
-  });
-  return aliases;
-}
-
-function extractNameCandidatesFromRecord(record: Record<string, unknown>): string[] {
-  const names: string[] = [];
-  Object.entries(record).forEach(([key, value]) => {
-    const normalizedKey = key.trim().toLowerCase();
-    if (!ENTITY_NAME_FIELD_KEYS.has(key.trim()) && !ENTITY_NAME_FIELD_KEYS.has(normalizedKey)) {
-      return;
-    }
-    if (typeof value === "string") {
-      names.push(value.trim());
-    }
-  });
-  return names;
-}
 
 function collectEntityHighlightHints(settingsList: SettingEntry[], cardsList: StoryCard[]): EntityHighlightHint[] {
   const hints: EntityHighlightHint[] = [];
@@ -734,6 +659,157 @@ function safeToRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function normalizeGraphPreviewToken(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+function buildGraphPreviewEdgeKey(source: string, relation: string, target: string): string {
+  const sourceToken = normalizeGraphPreviewToken(source);
+  const targetToken = normalizeGraphPreviewToken(target);
+  const relationToken = String(relation || "").trim().toUpperCase();
+  if (!sourceToken || !targetToken || !relationToken) return "";
+  return `${sourceToken}|${relationToken}|${targetToken}`;
+}
+
+function getActionBlastRadius(action: ChatAction | null | undefined): GraphBlastRadiusPreview | null {
+  const payload = safeToRecord(action?.payload);
+  const raw = safeToRecord(payload?._graph_blast_radius);
+  if (!raw) return null;
+
+  const nodes = (Array.isArray(raw.nodes) ? raw.nodes : [])
+    .map((item) => safeToRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+    .map((item) => {
+      const label =
+        typeof item.label === "string"
+          ? item.label.trim()
+          : typeof item.id === "string"
+            ? item.id.trim()
+            : "";
+      const id =
+        typeof item.id === "string" && item.id.trim().length > 0
+          ? item.id.trim()
+          : label;
+      if (!id || !label) return null;
+      return {
+        id,
+        label,
+        change: typeof item.change === "string" ? item.change : "touch",
+        role: typeof item.role === "string" ? item.role : "related",
+        in_current_graph: Boolean(item.in_current_graph),
+      };
+    })
+    .filter((item): item is GraphBlastRadiusPreview["nodes"][number] => item !== null);
+
+  const edges = (Array.isArray(raw.edges) ? raw.edges : [])
+    .map((item) => safeToRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+    .map((item) => {
+      const source = typeof item.source === "string" ? item.source.trim() : "";
+      const target = typeof item.target === "string" ? item.target.trim() : "";
+      const relation = typeof item.relation === "string" ? item.relation.trim().toUpperCase() : "";
+      const key =
+        typeof item.key === "string" && item.key.trim().length > 0
+          ? item.key.trim()
+          : buildGraphPreviewEdgeKey(source, relation, target);
+      if (!source || !target || !relation || !key) return null;
+      return {
+        key,
+        source,
+        target,
+        relation,
+        change: typeof item.change === "string" ? item.change : "add",
+        in_current_graph: Boolean(item.in_current_graph),
+      };
+    })
+    .filter((item): item is GraphBlastRadiusPreview["edges"][number] => item !== null);
+
+  const summaryWrap = safeToRecord(raw.summary);
+  const summaryNodes = safeToRecord(summaryWrap?.nodes) ?? {};
+  const summaryEdges = safeToRecord(summaryWrap?.edges) ?? {};
+
+  return {
+    source: typeof raw.source === "string" ? raw.source : "none",
+    action_type: typeof raw.action_type === "string" ? raw.action_type : String(action?.action_type || ""),
+    chapter_index:
+      typeof raw.chapter_index === "number"
+        ? raw.chapter_index
+        : typeof raw.chapter_index === "string" && raw.chapter_index.trim().length > 0
+          ? Number(raw.chapter_index)
+          : null,
+    nodes,
+    edges,
+    summary: {
+      nodes: Object.fromEntries(
+        Object.entries(summaryNodes).map(([key, value]) => [key, Number(value) || 0])
+      ),
+      edges: Object.fromEntries(
+        Object.entries(summaryEdges).map(([key, value]) => [key, Number(value) || 0])
+      ),
+    },
+    notes: Array.isArray(raw.notes)
+      ? raw.notes.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
+      : [],
+  };
+}
+
+function summarizeBlastRadius(preview: GraphBlastRadiusPreview | null): string | null {
+  if (!preview) return null;
+  const nodeSummary = safeToRecord(preview.summary?.nodes) ?? {};
+  const edgeSummary = safeToRecord(preview.summary?.edges) ?? {};
+  const createNodes = Number(nodeSummary.create ?? 0) || 0;
+  const updateNodes = Number(nodeSummary.update ?? 0) || 0;
+  const deleteNodes = Number(nodeSummary.delete ?? 0) || 0;
+  const touchNodes = Number(nodeSummary.touch ?? 0) || 0;
+  const addEdges = Number(edgeSummary.add ?? 0) || 0;
+  const updateEdges = Number(edgeSummary.update ?? 0) || 0;
+  const deleteEdges = Number(edgeSummary.delete ?? 0) || 0;
+  const parts: string[] = [];
+  if (createNodes > 0) parts.push(`+${createNodes} 节点`);
+  if (updateNodes > 0) parts.push(`~${updateNodes} 节点`);
+  if (deleteNodes > 0) parts.push(`-${deleteNodes} 节点`);
+  if (touchNodes > 0) parts.push(`${touchNodes} 波及`);
+  if (addEdges > 0) parts.push(`+${addEdges} 边`);
+  if (updateEdges > 0) parts.push(`~${updateEdges} 边`);
+  if (deleteEdges > 0) parts.push(`-${deleteEdges} 边`);
+  if (parts.length > 0) return parts.join(" / ");
+  return preview.notes?.[0] ?? "当前动作不直接改写图谱关系";
+}
+
+function resolveBlastRadiusTone(change: string): "add" | "update" | "delete" {
+  const normalized = String(change || "").trim().toLowerCase();
+  if (normalized === "create" || normalized === "add") return "add";
+  if (normalized === "delete" || normalized === "remove") return "delete";
+  return "update";
+}
+
+function buildBlastRadiusSummaryChips(preview: GraphBlastRadiusPreview | null): Array<{
+  key: string;
+  tone: "add" | "update" | "delete";
+  label: string;
+}> {
+  if (!preview) return [];
+  const nodeSummary = safeToRecord(preview.summary?.nodes) ?? {};
+  const edgeSummary = safeToRecord(preview.summary?.edges) ?? {};
+  const chips: Array<{ key: string; tone: "add" | "update" | "delete"; label: string }> = [];
+  const nodeCreate = Number(nodeSummary.create ?? 0) || 0;
+  const nodeUpdate = (Number(nodeSummary.update ?? 0) || 0) + (Number(nodeSummary.touch ?? 0) || 0);
+  const nodeDelete = Number(nodeSummary.delete ?? 0) || 0;
+  const edgeAdd = Number(edgeSummary.add ?? 0) || 0;
+  const edgeUpdate = Number(edgeSummary.update ?? 0) || 0;
+  const edgeDelete = Number(edgeSummary.delete ?? 0) || 0;
+  if (nodeCreate > 0) chips.push({ key: "node-create", tone: "add", label: `+${nodeCreate} 节点` });
+  if (nodeUpdate > 0) chips.push({ key: "node-update", tone: "update", label: `~${nodeUpdate} 节点` });
+  if (nodeDelete > 0) chips.push({ key: "node-delete", tone: "delete", label: `-${nodeDelete} 节点` });
+  if (edgeAdd > 0) chips.push({ key: "edge-add", tone: "add", label: `+${edgeAdd} 边` });
+  if (edgeUpdate > 0) chips.push({ key: "edge-update", tone: "update", label: `~${edgeUpdate} 边` });
+  if (edgeDelete > 0) chips.push({ key: "edge-delete", tone: "delete", label: `-${edgeDelete} 边` });
+  return chips;
+}
+
 function diffValuePreview(value: unknown, maxLength = 220): string {
   let serialized = "";
   if (value === undefined) {
@@ -1013,6 +1089,8 @@ const LazyProWorkspaceMode = lazy(async () => {
 type AssistantChatPanelProps = {
   usage: Record<string, unknown> | null;
   messages: UiMessage[];
+  settings: SettingEntry[];
+  cards: StoryCard[];
   input: string;
   streaming: boolean;
   composerInputRef: { current: HTMLTextAreaElement | null };
@@ -1023,6 +1101,8 @@ type AssistantChatPanelProps = {
 const AssistantChatPanel = memo(function AssistantChatPanel({
   usage,
   messages,
+  settings,
+  cards,
   input,
   streaming,
   composerInputRef,
@@ -1048,7 +1128,11 @@ const AssistantChatPanel = memo(function AssistantChatPanel({
               <span>{formatRole(message.role)}</span>
               {message.streaming ? <em>streaming...</em> : null}
             </div>
-            <pre>{message.content}</pre>
+            {message.role === "assistant" ? (
+              <ContextXRayMessage message={message} settings={settings} cards={cards} />
+            ) : (
+              <pre>{message.content}</pre>
+            )}
           </article>
         ))}
       </div>
@@ -1074,16 +1158,22 @@ const AssistantChatPanel = memo(function AssistantChatPanel({
 type ActionCardProps = {
   action: ChatAction;
   isPending: boolean;
+  isPreviewActive: boolean;
   controlsDisabled: boolean;
   onLoadLogs: (actionId: number) => Promise<void>;
+  onPreviewEnter: (actionId: number) => void;
+  onPreviewLeave: () => void;
   onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
 };
 
 const ActionCard = memo(function ActionCard({
   action,
   isPending,
+  isPreviewActive,
   controlsDisabled,
   onLoadLogs,
+  onPreviewEnter,
+  onPreviewLeave,
   onMutateAction,
 }: ActionCardProps) {
   const actionIntent = useMemo(() => resolveActionIntent(action.action_type), [action.action_type]);
@@ -1091,6 +1181,9 @@ const ActionCard = memo(function ActionCard({
   const actionStatusLabel = useMemo(() => resolveActionStatusLabel(action.status), [action.status]);
   const summaryLines = useMemo(() => summarizeAction(action), [action]);
   const riskHints = useMemo(() => actionRiskHints(action), [action]);
+  const blastRadius = useMemo(() => getActionBlastRadius(action), [action]);
+  const blastRadiusSummary = useMemo(() => summarizeBlastRadius(blastRadius), [blastRadius]);
+  const canPreviewBlastRadius = action.status === "proposed" && blastRadius !== null;
   const diffRows = useMemo(() => buildActionDiffRows(action), [action]);
   const [undoFlash, setUndoFlash] = useState(false);
   const previousStatusRef = useRef(action.status);
@@ -1122,10 +1215,27 @@ const ActionCard = memo(function ActionCard({
 
   const cardClassName = `action-card action-intent-${actionIntent}${isPending ? " highlight" : ""}${
     undoFlash ? " undo-flash" : ""
-  }${action.status === "applied" ? " is-applied" : ""}`;
+  }${action.status === "applied" ? " is-applied" : ""}${isPreviewActive ? " is-preview-active" : ""}`;
 
   return (
-    <article className={cardClassName}>
+    <article
+      className={cardClassName}
+      onMouseEnter={() => {
+        if (canPreviewBlastRadius) onPreviewEnter(action.id);
+      }}
+      onMouseLeave={() => {
+        if (canPreviewBlastRadius) onPreviewLeave();
+      }}
+      onFocusCapture={() => {
+        if (canPreviewBlastRadius) onPreviewEnter(action.id);
+      }}
+      onBlurCapture={(event) => {
+        if (!canPreviewBlastRadius) return;
+        const nextTarget = event.relatedTarget;
+        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+        onPreviewLeave();
+      }}
+    >
       <button type="button" className="action-summary" onClick={() => void onLoadLogs(action.id)}>
         <span>#{action.id}</span>
         <strong>{`${actionIntentLabel} · ${action.action_type}`}</strong>
@@ -1145,6 +1255,7 @@ const ActionCard = memo(function ActionCard({
             风险提示：{line}
           </p>
         ))}
+        {blastRadiusSummary ? <p className="action-preview-line">爆炸半径：{blastRadiusSummary}</p> : null}
       </div>
       <div className="action-diff">
         {diffRows.map((row, idx) => {
@@ -2104,6 +2215,56 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
 }: AssistantActionsPanelProps) {
   const pendingActionSet = useMemo(() => new Set(pendingActionIds), [pendingActionIds]);
   const latestAudits = useMemo(() => consistencyAudits.slice(0, 3), [consistencyAudits]);
+  const [hoveredActionId, setHoveredActionId] = useState<number | null>(null);
+  const hoveredAction = useMemo(
+    () => sortedActions.find((item) => item.id === hoveredActionId) ?? null,
+    [hoveredActionId, sortedActions]
+  );
+  const selectedAction = useMemo(
+    () => sortedActions.find((item) => item.id === selectedActionId) ?? null,
+    [selectedActionId, sortedActions]
+  );
+  const activeBlastAction = hoveredAction ?? selectedAction;
+  const previewBlastRadius = useMemo(() => getActionBlastRadius(activeBlastAction), [activeBlastAction]);
+  const previewBlastRadiusSummary = useMemo(() => summarizeBlastRadius(previewBlastRadius), [previewBlastRadius]);
+  const previewBlastRadiusChips = useMemo(
+    () => buildBlastRadiusSummaryChips(previewBlastRadius),
+    [previewBlastRadius]
+  );
+  const previewActionLabel = useMemo(
+    () => (activeBlastAction ? summarizeAction(activeBlastAction)[0] ?? `动作 #${activeBlastAction.id}` : ""),
+    [activeBlastAction]
+  );
+  const previewNodeChangeMap = useMemo(() => {
+    const next = new Map<string, string>();
+    if (!previewBlastRadius) return next;
+    previewBlastRadius.nodes.forEach((item) => {
+      next.set(normalizeGraphPreviewToken(item.id || item.label), String(item.change || "touch"));
+    });
+    return next;
+  }, [previewBlastRadius]);
+  const previewEdgeChangeMap = useMemo(() => {
+    const next = new Map<string, string>();
+    if (!previewBlastRadius) return next;
+    previewBlastRadius.edges.forEach((item) => {
+      next.set(
+        buildGraphPreviewEdgeKey(item.source, item.relation, item.target),
+        String(item.change || "add")
+      );
+    });
+    return next;
+  }, [previewBlastRadius]);
+  const hasPreviewOverlay = Boolean(
+    previewBlastRadius && (previewBlastRadius.nodes.length > 0 || previewBlastRadius.edges.length > 0)
+  );
+  const hasBlastRadiusPanel = Boolean(hasPreviewOverlay || (previewBlastRadius?.notes?.length ?? 0) > 0);
+
+  useEffect(() => {
+    if (hoveredActionId === null) return;
+    if (sortedActions.some((item) => item.id === hoveredActionId)) return;
+    setHoveredActionId(null);
+  }, [hoveredActionId, sortedActions]);
+
   const traceGroups = useMemo(() => {
     const source = traceEvents.slice(-24);
     const groups: Array<{
@@ -2157,6 +2318,7 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
     graphTimeline,
     graphTimelineChapterIndex,
     maxChapterIndex,
+    previewBlastRadius,
   });
   const resolveTraceChapterIndex = (item: ChatStreamTraceEvent): number | null => {
     const metaRecord = item.meta && typeof item.meta === "object" ? (item.meta as Record<string, unknown>) : null;
@@ -2328,11 +2490,18 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
               const source = graphLayout.positions[edge.source];
               const target = graphLayout.positions[edge.target];
               if (!source || !target) return null;
-              const edgeClassName = selectedTimelineNodeId
-                ? highlightedEdgeIdSet.has(edge.id)
-                  ? "timeline-edge is-linked"
+              const previewChange = hasPreviewOverlay
+                ? previewEdgeChangeMap.get(buildGraphPreviewEdgeKey(edge.source, edge.relation, edge.target))
+                : null;
+              const edgeClassName = hasPreviewOverlay
+                ? previewChange
+                  ? `timeline-edge preview-${resolveBlastRadiusTone(previewChange)}`
                   : "timeline-edge is-dim"
-                : "timeline-edge";
+                : selectedTimelineNodeId
+                  ? highlightedEdgeIdSet.has(edge.id)
+                    ? "timeline-edge is-linked"
+                    : "timeline-edge is-dim"
+                  : "timeline-edge";
               return (
                 <line
                   key={edge.id}
@@ -2351,13 +2520,21 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
               if (!point) return null;
               const isSelected = selectedTimelineNodeId === node.id;
               const isNeighbor = highlightedNodeIdSet.has(node.id);
-              const nodeClassName = selectedTimelineNodeId
-                ? isSelected
-                  ? "timeline-node is-active"
-                  : isNeighbor
-                    ? "timeline-node is-neighbor"
-                    : "timeline-node is-dim"
-                : "timeline-node";
+              const previewChange = hasPreviewOverlay
+                ? previewNodeChangeMap.get(normalizeGraphPreviewToken(node.id || node.label))
+                : null;
+              const previewTone = previewChange ? resolveBlastRadiusTone(previewChange) : null;
+              const nodeClassName = hasPreviewOverlay
+                ? previewTone
+                  ? `timeline-node preview-${previewTone}${node.kind === "preview" ? " is-preview-ghost" : ""}`
+                  : "timeline-node is-dim"
+                : selectedTimelineNodeId
+                  ? isSelected
+                    ? "timeline-node is-active"
+                    : isNeighbor
+                      ? "timeline-node is-neighbor"
+                      : "timeline-node is-dim"
+                  : "timeline-node";
               const toggleNodeHighlight = () => {
                 setSelectedTimelineNodeId((prev) => (prev === node.id ? null : node.id));
               };
@@ -2385,7 +2562,41 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
             })}
           </svg>
         ) : null}
-        {selectedTimelineNodeId ? (
+        {hasBlastRadiusPanel ? (
+          <div className="timeline-preview-bar blast-radius-panel" aria-live="polite">
+            <div className="blast-radius-head">
+              <strong>动作爆炸半径</strong>
+              <small>{activeBlastAction ? `#${activeBlastAction.id} · ${previewActionLabel}` : "待选择动作"}</small>
+            </div>
+            <div className="blast-radius-summary">
+              {previewBlastRadiusChips.length > 0
+                ? previewBlastRadiusChips.map((item) => (
+                    <span key={item.key} className={`blast-radius-chip is-${item.tone}`}>
+                      {item.label}
+                    </span>
+                  ))
+                : <span className="blast-radius-chip is-update">仅锚点波及</span>}
+            </div>
+            <div className="blast-radius-legend">
+              <span className="blast-radius-chip is-add">新增 / 投影</span>
+              <span className="blast-radius-chip is-update">更新 / 波及</span>
+              <span className="blast-radius-chip is-delete">删除 / 置换</span>
+            </div>
+            <div className="blast-radius-node-list">
+              {(previewBlastRadius?.nodes ?? []).slice(0, 8).map((item) => (
+                <span
+                  key={`${item.id}-${item.label}`}
+                  className={`blast-radius-node-pill is-${resolveBlastRadiusTone(item.change)}${item.in_current_graph ? "" : " is-ghost"}`}
+                  title={`${item.role || "related"} · ${item.in_current_graph ? "已存在节点" : "投影节点"}`}
+                >
+                  {item.label}
+                </span>
+              ))}
+            </div>
+            {previewBlastRadiusSummary ? <small>{previewBlastRadiusSummary}</small> : null}
+            {previewBlastRadius?.notes?.[0] ? <small>{previewBlastRadius.notes[0]}</small> : null}
+          </div>
+        ) : selectedTimelineNodeId ? (
           <div className="timeline-focus-bar">
             <small>{`已高亮：${selectedTimelineNodeLabel}`}</small>
             <button
@@ -2407,8 +2618,11 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
             key={action.id}
             action={action}
             isPending={pendingActionSet.has(action.id)}
+            isPreviewActive={hoveredActionId === action.id || (hoveredActionId === null && selectedActionId === action.id)}
             controlsDisabled={mutatingActionId !== null}
             onLoadLogs={onLoadLogs}
+            onPreviewEnter={setHoveredActionId}
+            onPreviewLeave={() => setHoveredActionId(null)}
             onMutateAction={onMutateAction}
           />
         ))}
@@ -2433,6 +2647,8 @@ type AssistantDrawerProps = {
   projectSessions: ChatSessionSummary[];
   usage: Record<string, unknown> | null;
   messages: UiMessage[];
+  settings: SettingEntry[];
+  cards: StoryCard[];
   input: string;
   streaming: boolean;
   composerInputRef: { current: HTMLTextAreaElement | null };
@@ -2473,6 +2689,8 @@ const AssistantDrawer = memo(function AssistantDrawer({
   projectSessions,
   usage,
   messages,
+  settings,
+  cards,
   input,
   streaming,
   composerInputRef,
@@ -2612,6 +2830,8 @@ const AssistantDrawer = memo(function AssistantDrawer({
           <AssistantChatPanel
             usage={usage}
             messages={messages}
+            settings={settings}
+            cards={cards}
             input={input}
             streaming={streaming}
             composerInputRef={composerInputRef}
@@ -2854,6 +3074,7 @@ export default function App() {
     "balanced" | "chapter_focus" | "world_focus" | "minimal"
   >("balanced");
   const [workbenchPanelVisibility, setWorkbenchPanelVisibility] = useState<WorkbenchPanelVisibility>({
+    actions: true,
     prompt: false,
     planning: true,
     snapshot: false,
@@ -2880,7 +3101,10 @@ export default function App() {
   const previousAssistantDrawerOpenRef = useRef(false);
   const previousSettingsDialogOpenRef = useRef(false);
   const ghostRequestRef = useRef(0);
+  const ghostRequestCacheKeyRef = useRef("");
+  const ghostSocketRef = useRef<WebSocket | null>(null);
   const acceptGhostTextRef = useRef<(() => void) | null>(null);
+  const acceptGhostWordRef = useRef<(() => void) | null>(null);
   const rejectGhostTextRef = useRef<(() => void) | null>(null);
   const regenerateGhostTextRef = useRef<(() => void) | null>(null);
   const writingShortcutStateRef = useRef<{
@@ -3035,14 +3259,21 @@ export default function App() {
         };
 
         return {
-          "Mod-Enter": () => {
+          Tab: () => {
             if (!canRun()) return false;
             const state = writingShortcutStateRef.current;
             if (!state?.hasGhostText || state.ghostLoading) return false;
             acceptGhostTextRef.current?.();
             return true;
           },
-          "Mod-Backspace": () => {
+          "Ctrl-ArrowRight": () => {
+            if (!canRun()) return false;
+            const state = writingShortcutStateRef.current;
+            if (!state?.hasGhostText || state.ghostLoading) return false;
+            acceptGhostWordRef.current?.();
+            return true;
+          },
+          Escape: () => {
             if (!canRun()) return false;
             const state = writingShortcutStateRef.current;
             if (!state?.hasGhostText) return false;
@@ -3459,8 +3690,10 @@ export default function App() {
         placeholder:
           "在这里写正文。你可以选中一段文字后让 AI 润色/扩写，也可以把助手回复一键写回正文。",
       }),
+      GhostTextExtension,
       ghostTextShortcutExtension,
       EntityInlineHintExtension,
+      SemanticDiffExtension,
     ],
     content: toEditorDoc(""),
     editable: false,
@@ -3790,6 +4023,35 @@ export default function App() {
   }, [editor, entityHighlightHints]);
 
   useEffect(() => {
+    if (!editor) return;
+    if (ghostText.trim()) {
+      editor.commands.setGhostText(ghostText);
+      return;
+    }
+    editor.commands.clearGhostText();
+  }, [editor, ghostText]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ action?: string; id?: string }>).detail;
+      if (!detail?.id) return;
+      if (detail.action === "accept") {
+        editor.commands.acceptDiffSuggestion(detail.id);
+        setDraftText(readEditorText(editor));
+        return;
+      }
+      if (detail.action === "reject") {
+        editor.commands.rejectDiffSuggestion(detail.id);
+      }
+    };
+    editor.view.dom.addEventListener("semantic-diff-action", handler as EventListener);
+    return () => {
+      editor.view.dom.removeEventListener("semantic-diff-action", handler as EventListener);
+    };
+  }, [editor]);
+
+  useEffect(() => {
     typewriterModeEnabledRef.current = typewriterModeEnabled;
   }, [typewriterModeEnabled]);
 
@@ -3813,6 +4075,7 @@ export default function App() {
     if (!editor) return;
     const normalized = normalizeEditorText(draftText);
     if (readEditorText(editor) !== normalized) {
+      editor.commands.clearDiffSuggestions();
       editor.commands.setContent(toEditorDoc(normalized), { emitUpdate: false });
       scheduleTypewriterScroll(editor);
       syncTypewriterParagraphFocus(editor);
@@ -3849,22 +4112,117 @@ export default function App() {
     ].join("|");
   };
 
-  const requestGhostSuggestion = async (_forceRefresh = false) => {
-    setGhostLoading(false);
+  const requestGhostSuggestion = async (forceRefresh = false) => {
+    if (!editor || !activeChapterId || draftLoading) {
+      setGhostText("");
+      setGhostError(null);
+      setGhostLoading(false);
+      return;
+    }
+    const { from, to, empty } = editor.state.selection;
+    if (!empty) {
+      setGhostText("");
+      setGhostError(null);
+      setGhostLoading(false);
+      return;
+    }
+
+    const prefix = editor.state.doc.textBetween(1, from, "\n", "\n");
+    const suffix = editor.state.doc.textBetween(to, editor.state.doc.content.size, "\n", "\n");
+    const nextCacheKey = `${buildGhostCacheKey()}|${prefix.slice(-120)}|${suffix.slice(0, 80)}`;
+    if (!forceRefresh && !prefix.trim()) {
+      setGhostText("");
+      setGhostError(null);
+      setGhostLoading(false);
+      return;
+    }
+    if (!forceRefresh && ghostText.trim() && nextCacheKey === ghostRequestCacheKeyRef.current) {
+      return;
+    }
+
+    ghostRequestRef.current += 1;
+    const requestId = ghostRequestRef.current;
+    const requestCacheKey = nextCacheKey;
+    ghostSocketRef.current?.close();
+    setGhostLoading(true);
     setGhostText("");
     setGhostError(null);
+
+    let streamed = "";
+    const socket = openGhostTextSocket(
+      (event: GhostTextStreamEvent) => {
+        if (ghostSocketRef.current !== socket || ghostRequestRef.current !== requestId) return;
+        if (event.type === "start") {
+          streamed = "";
+          setGhostText("");
+          return;
+        }
+        if (event.type === "delta") {
+          streamed += event.text || "";
+          setGhostText(streamed);
+          return;
+        }
+        if (event.type === "done") {
+          const finalText = String(event.text || streamed || "").trim();
+          setGhostText(finalText);
+          setGhostError(null);
+          setGhostLoading(false);
+          ghostRequestCacheKeyRef.current = requestCacheKey;
+          return;
+        }
+        if (event.type === "error") {
+          setGhostText("");
+          setGhostError(event.message || "Ghost Text 生成失败");
+          setGhostLoading(false);
+        }
+      },
+      {
+        onOpen: () => {
+          if (ghostSocketRef.current !== socket || ghostRequestRef.current !== requestId) return;
+          sendGhostTextStreamRequest(socket, {
+            project_id: projectId,
+            chapter_id: activeChapterId,
+            scene_beat_id: activeSceneBeatId,
+            prompt_template_id: activePromptTemplateId,
+            prefix,
+            suffix,
+            chapter_goal: ghostChapterGoal || null,
+            active_roles: ghostActiveRoles,
+            model: model.trim() ? model.trim() : null,
+            model_profile_id: ghostModelProfileId,
+            style_guard: true,
+            temperature_profile: ghostTemperatureProfile,
+            temperature_override: temperatureOverride,
+          });
+        },
+        onClose: () => {
+          if (ghostSocketRef.current === socket) {
+            ghostSocketRef.current = null;
+            setGhostLoading(false);
+          }
+        },
+        onError: () => {
+          if (ghostSocketRef.current === socket) {
+            setGhostError("Ghost Text 连接失败");
+            setGhostLoading(false);
+          }
+        },
+      }
+    );
+    ghostSocketRef.current = socket;
   };
 
 
   useEffect(() => {
     if (!ghostAutoEnabled) {
-      if (!ghostLoading) {
-        return;
-      }
+      ghostSocketRef.current?.close();
+      setGhostText("");
+      setGhostError(null);
       setGhostLoading(false);
       return;
     }
-    if (!activeChapterId || draftLoading) {
+    if (!activeChapterId || draftLoading || !editor || streaming) {
+      ghostSocketRef.current?.close();
       setGhostText("");
       setGhostError(null);
       setGhostLoading(false);
@@ -3872,13 +4230,14 @@ export default function App() {
     }
     const timer = window.setTimeout(() => {
       void requestGhostSuggestion(false);
-    }, 900);
+    }, 1500);
     return () => window.clearTimeout(timer);
   }, [
     activeChapterId,
     activeSceneBeatId,
     draftText,
     draftLoading,
+    editor,
     projectId,
     activePromptTemplateId,
     activeModelProfileId,
@@ -3890,6 +4249,12 @@ export default function App() {
     ghostChapterGoal,
     ghostActiveRoles,
   ]);
+
+  useEffect(() => {
+    return () => {
+      ghostSocketRef.current?.close();
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -4141,7 +4506,7 @@ export default function App() {
     if (!editor) return;
     const assistantText = latestAssistantReply;
     if (!assistantText) {
-      setError("暂无可写回的助手回复。先让助手生成内容。");
+      setError("暂无可写回的助手回复。先让助手生成内容。");      
       return;
     }
 
@@ -4149,9 +4514,20 @@ export default function App() {
 
     const { from, to, empty } = editor.state.selection;
     const shouldReplace = mode === "replace" && !empty;
+
+    if (shouldReplace) {
+      const originalText = editor.state.doc.textBetween(from, to, "\n", "\n");
+      const suggestions = buildDiffSuggestions(from, originalText, assistantText);
+      editor.commands.setDiffSuggestions(suggestions);
+      if (suggestions.length === 0) {
+        setError("助手回复与当前选区没有差异。");
+      }
+        return;
+    }
+
     let insertion = assistantText;
     if (!shouldReplace) {
-      const beforeChar = from > 1 ? editor.state.doc.textBetween(from - 1, from, "\n", "\n") : "";
+      const beforeChar = from > 1 ? editor.state.doc.textBetween(from - 1, from, "\n", "\n") : "";        
       const prefix = from > 1 && !/\s/.test(beforeChar) ? "\n\n" : "";
       insertion = `${prefix}${assistantText}`;
     }
@@ -4161,7 +4537,6 @@ export default function App() {
     setDraftText(readEditorText(editor));
     setSelectedDraftText("");
   };
-
   const acceptGhostText = () => {
     if (!editor || !ghostText.trim()) return;
     const { from, to } = editor.state.selection;
@@ -4170,18 +4545,39 @@ export default function App() {
     setDraftText(readEditorText(editor));
     setGhostText("");
     setGhostError(null);
+    ghostRequestCacheKeyRef.current = "";
+    ghostSocketRef.current?.close();
+  };
+
+  const acceptGhostWord = () => {
+    if (!editor || !ghostText.trim()) return;
+    const nextWord = takeGhostWord(ghostText);
+    if (!nextWord) return;
+    const { from, to } = editor.state.selection;
+    const insertionContent = toEditorDoc(nextWord).content ?? [];
+    editor.chain().focus().insertContentAt({ from, to }, insertionContent).run();
+    setDraftText(readEditorText(editor));
+    const remaining = ghostText.slice(nextWord.length);
+    setGhostText(remaining);
+    setGhostError(null);
   };
 
   const rejectGhostText = () => {
     setGhostText("");
     setGhostError(null);
+    ghostRequestCacheKeyRef.current = "";
+    ghostSocketRef.current?.close();
   };
 
   const regenerateGhostText = async () => {
     setGhostText("");
     setGhostError(null);
+    ghostRequestCacheKeyRef.current = "";
+    ghostSocketRef.current?.close();
+    await requestGhostSuggestion(true);
   };
   acceptGhostTextRef.current = acceptGhostText;
+  acceptGhostWordRef.current = acceptGhostWord;
   rejectGhostTextRef.current = rejectGhostText;
   regenerateGhostTextRef.current = regenerateGhostText;
 
@@ -4237,10 +4633,11 @@ export default function App() {
         return;
       }
       const { from, to } = editor.state.selection;
-      const insertionContent = toEditorDoc(nextText).content ?? [];
-      editor.chain().focus().insertContentAt({ from, to }, insertionContent).run();
-      setDraftText(readEditorText(editor));
-      setSelectedDraftText("");
+      const suggestions = buildDiffSuggestions(from, selectedDraftText, nextText);
+      editor.commands.setDiffSuggestions(suggestions);
+      if (suggestions.length === 0) {
+        setError("润色/扩写结果与原文没有差异");
+      }
     } catch (rewriteError) {
       if (ghostRequestRef.current !== requestId) return;
       const message = rewriteError instanceof Error ? rewriteError.message : "润色/扩写失败";
@@ -4661,6 +5058,8 @@ export default function App() {
       }
       setMessages(snapshotData.messagesData.map(toUiMessage));
       setActions(snapshotData.actionsData);
+      setSettings(snapshotData.settingsData);
+      setCards(snapshotData.cardsData);
       setProjectSessions(snapshotData.sessionsData);
     };
 
@@ -4672,12 +5071,14 @@ export default function App() {
     let snapshotPromise = postChatSnapshotInFlightRef.current.get(cacheKey);
     if (!snapshotPromise) {
       snapshotPromise = (async (): Promise<PostChatSnapshotData> => {
-        const [messagesData, actionsData, sessionsData] = await Promise.all([
+        const [messagesData, actionsData, settingsData, cardsData, sessionsData] = await Promise.all([
           getSessionMessages(nextSessionId),
           getSessionActions(nextSessionId),
+          getProjectSettings(nextProjectId),
+          getProjectCards(nextProjectId),
           getProjectSessions(nextProjectId).catch(() => [] as ChatSessionSummary[]),
         ]);
-        return { messagesData, actionsData, sessionsData };
+        return { messagesData, actionsData, settingsData, cardsData, sessionsData };
       })();
       postChatSnapshotInFlightRef.current.set(cacheKey, snapshotPromise);
     }
@@ -4783,8 +5184,6 @@ export default function App() {
     draftSnapshotRequestSeqRef.current = 0;
     planningSnapshotInFlightRef.current.clear();
     planningSnapshotRequestSeqRef.current = 0;
-    projectSnapshotInFlightRef.current.clear();
-    projectSnapshotRequestSeqRef.current = 0;
     fullSessionSnapshotInFlightRef.current.clear();
     fullSessionSnapshotRequestSeqRef.current = 0;
     templateRevisionsInFlightRef.current.clear();
@@ -4793,6 +5192,11 @@ export default function App() {
     postChatSnapshotInFlightRef.current.clear();
     postChatSnapshotRequestSeqRef.current = 0;
   }, [projectId, sessionId]);
+
+  useEffect(() => {
+    projectSnapshotInFlightRef.current.clear();
+    projectSnapshotRequestSeqRef.current = 0;
+  }, [projectId]);
 
   useEffect(() => {
     const wasOpen = previousSettingsDialogOpenRef.current;
@@ -5324,6 +5728,29 @@ export default function App() {
                 [panelKey]: !prev[panelKey],
               }))
             }
+            actionsPanelNode={
+              <AssistantActionsPanel
+                sortedActions={sortedActions}
+                pendingActionIds={pendingActionIds}
+                mutatingActionId={mutatingActionId}
+                streamLatencySamples={streamLatencySamples}
+                tokenUsageSamples={tokenUsageSamples}
+                retrievalHitSamples={retrievalHitSamples}
+                consistencyAudits={consistencyAudits}
+                consistencyAuditRunning={consistencyAuditRunning}
+                traceEvents={traceEvents}
+                graphTimeline={graphTimeline}
+                graphTimelineLoading={graphTimelineLoading}
+                graphTimelineChapterIndex={graphTimelineChapterIndex}
+                maxChapterIndex={maxChapterIndex}
+                setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
+                selectedActionId={selectedActionId}
+                actionLogs={actionLogs}
+                onLoadLogs={loadLogs}
+                onMutateAction={mutateAction}
+                onRunConsistencyAudit={runConsistencyAudit}
+              />
+            }
             promptPanelReady={debugPromptPanelReady}
             promptPanelProps={{
               activePromptTemplate,
@@ -5470,6 +5897,8 @@ export default function App() {
           projectSessions={projectSessions}
           usage={usage}
           messages={messages}
+          settings={settings}
+          cards={cards}
           input={input}
           streaming={streaming}
           composerInputRef={composerInputRef}

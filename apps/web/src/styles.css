@@ -563,6 +563,20 @@ textarea:focus {
   opacity: 0.18;
 }
 
+.timeline-edge.preview-add,
+.timeline-edge.preview-update {
+  stroke: rgba(28, 126, 72, 0.95);
+  stroke-width: 2.5;
+  opacity: 1;
+}
+
+.timeline-edge.preview-delete {
+  stroke: rgba(182, 38, 62, 0.92);
+  stroke-width: 2.5;
+  stroke-dasharray: 5 4;
+  opacity: 1;
+}
+
 .timeline-node {
   cursor: pointer;
 }
@@ -605,6 +619,27 @@ textarea:focus {
   fill: #153a9b;
 }
 
+.timeline-node.preview-add circle,
+.timeline-node.preview-update circle {
+  fill: rgba(35, 139, 79, 0.88);
+  stroke: rgba(240, 255, 246, 0.98);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 10px rgba(35, 139, 79, 0.24));
+}
+
+.timeline-node.preview-delete circle {
+  fill: rgba(188, 56, 84, 0.9);
+  stroke: rgba(255, 241, 244, 0.98);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 10px rgba(188, 56, 84, 0.24));
+}
+
+.timeline-node.preview-add text,
+.timeline-node.preview-update text,
+.timeline-node.preview-delete text {
+  fill: #14213d;
+}
+
 .timeline-node:focus-visible {
   outline: none;
 }
@@ -624,6 +659,81 @@ textarea:focus {
 
 .timeline-focus-bar small {
   color: var(--text-muted);
+}
+
+.timeline-preview-bar {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(28, 126, 72, 0.2);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(221, 247, 232, 0.96), rgba(255, 245, 247, 0.96));
+}
+
+.timeline-preview-bar small {
+  color: var(--text-muted);
+}
+
+.timeline-preview-bar strong {
+  color: #173924;
+}
+
+.blast-radius-panel {
+  align-items: start;
+}
+
+.blast-radius-head,
+.blast-radius-summary,
+.blast-radius-legend,
+.blast-radius-node-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.blast-radius-head {
+  justify-content: space-between;
+}
+
+.blast-radius-chip,
+.blast-radius-node-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.blast-radius-chip.is-add,
+.blast-radius-node-pill.is-add {
+  background: rgba(35, 139, 79, 0.12);
+  border-color: rgba(35, 139, 79, 0.24);
+  color: #146a42;
+}
+
+.blast-radius-chip.is-update,
+.blast-radius-node-pill.is-update {
+  background: rgba(241, 183, 47, 0.18);
+  border-color: rgba(196, 143, 25, 0.28);
+  color: #7f5607;
+}
+
+.blast-radius-chip.is-delete,
+.blast-radius-node-pill.is-delete {
+  background: rgba(188, 56, 84, 0.12);
+  border-color: rgba(188, 56, 84, 0.22);
+  color: #982845;
+}
+
+.blast-radius-node-pill.is-ghost {
+  border-style: dashed;
 }
 
 .timeline-meta {
@@ -1007,6 +1117,71 @@ textarea:focus {
 
 .draft-editor .ProseMirror p:last-child {
   margin-bottom: 0;
+}
+
+.draft-editor .ProseMirror .ghost-text-widget {
+  display: inline;
+  color: rgba(69, 84, 105, 0.38);
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+
+.draft-editor .ProseMirror .diff-original-text {
+  color: #b42318;
+  background: rgba(217, 45, 32, 0.12);
+  text-decoration: line-through;
+  border-radius: 4px;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-widget {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 4px;
+  padding: 2px 8px;
+  border: 1px solid rgba(18, 183, 106, 0.2);
+  border-radius: 999px;
+  background:
+    linear-gradient(135deg, rgba(226, 252, 239, 0.98), rgba(238, 252, 245, 0.92));
+  box-shadow: 0 8px 18px rgba(11, 112, 67, 0.12);
+  vertical-align: middle;
+}
+
+.draft-editor .ProseMirror .diff-suggested-text {
+  color: #027a48;
+  white-space: pre-wrap;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-widget:hover .diff-suggestion-actions {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.draft-editor .ProseMirror .diff-suggestion-action {
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-action.accept {
+  color: #f8fffb;
+  background: #027a48;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-action.reject {
+  color: #6941c6;
+  background: rgba(105, 65, 198, 0.12);
 }
 
 .draft-editor .ProseMirror .entity-inline-hint {
@@ -1572,6 +1747,73 @@ pre {
   word-break: break-word;
 }
 
+.context-xray-message {
+  position: relative;
+}
+
+.context-xray-token {
+  cursor: help;
+  text-decoration: underline dotted rgba(38, 142, 122, 0.62);
+  text-underline-offset: 3px;
+  background: rgba(38, 142, 122, 0.12);
+  border-radius: 4px;
+  transition: background 0.18s ease, text-decoration-color 0.18s ease;
+}
+
+.context-xray-token[data-context-xray-source="fallback"] {
+  text-decoration-color: rgba(50, 94, 207, 0.55);
+  background: rgba(50, 94, 207, 0.1);
+}
+
+.context-xray-token:hover,
+.context-xray-token:focus-visible {
+  outline: none;
+  background: rgba(38, 142, 122, 0.22);
+}
+
+.context-xray-token[data-context-xray-source="fallback"]:hover,
+.context-xray-token[data-context-xray-source="fallback"]:focus-visible {
+  background: rgba(50, 94, 207, 0.18);
+}
+
+.context-xray-popover {
+  z-index: 60;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(241, 247, 245, 0.97));
+  box-shadow:
+    0 18px 40px rgba(15, 23, 42, 0.18),
+    0 4px 14px rgba(15, 23, 42, 0.08);
+  padding: 12px 14px;
+}
+
+.context-xray-popover-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(38, 142, 122, 0.12);
+  color: #166a5a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.context-xray-popover strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+  color: #102033;
+}
+
+.context-xray-popover p {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -1663,6 +1905,12 @@ summary:focus-visible {
 .action-risk-line {
   margin: 0;
   color: #9d4b10;
+}
+
+.action-preview-line {
+  margin: 0;
+  color: #146a42;
+  font-weight: 600;
 }
 
 .action-diff {
@@ -1809,6 +2057,12 @@ summary:focus-visible {
 
 .action-card.highlight {
   outline: 2px solid rgba(38, 87, 217, 0.25);
+}
+
+.action-card.is-preview-active {
+  box-shadow:
+    inset 0 0 0 1px rgba(28, 126, 72, 0.18),
+    0 10px 24px rgba(28, 126, 72, 0.1);
 }
 
 .action-card.undo-flash {

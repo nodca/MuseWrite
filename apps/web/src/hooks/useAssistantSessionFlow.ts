@@ -14,6 +14,7 @@ import {
   updateProjectSession,
   type ChatStreamTimingMetrics,
 } from "../api/chatApi";
+import { attachEvidenceToUiMessage } from "../components/chat/messageMapping";
 import type {
   ActionAuditLog,
   ChatSessionSummary,
@@ -300,6 +301,7 @@ export function useAssistantSessionFlow({
       }
       if (event.type === "evidence") {
         setEvidence(event);
+        updateMessage(assistantLocalId, (message) => attachEvidenceToUiMessage(message, event));
         return;
       }
       if (event.type === "trace") {

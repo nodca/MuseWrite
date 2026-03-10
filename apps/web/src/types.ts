@@ -5,6 +5,7 @@ export interface UiMessage {
   role: ChatRole;
   content: string;
   streaming?: boolean;
+  contextXRay?: ContextXRayPayload | null;
 }
 
 export type DraftAutoSaveState = "idle" | "pending" | "saving" | "saved" | "error";
@@ -47,6 +48,29 @@ export interface GhostTextRewriteRequest {
 export interface GhostTextResponse {
   suggestion: string;
   usage: Record<string, unknown>;
+}
+
+export interface GhostTextStreamRequest {
+  project_id: number;
+  chapter_id?: number | null;
+  scene_beat_id?: number | null;
+  prompt_template_id?: number | null;
+  prefix: string;
+  suffix: string;
+  chapter_goal?: string | null;
+  active_roles?: string[] | null;
+  model: string | null;
+  style_guard?: boolean;
+  temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;
+  temperature_override?: number | null;
+  model_profile_id?: string | null;
+}
+
+export interface GhostTextStreamEvent {
+  type: "start" | "delta" | "done" | "error";
+  text: string;
+  usage?: Record<string, unknown>;
+  message?: string | null;
 }
 
 export interface ChatStreamMetaEvent {
@@ -159,6 +183,11 @@ export interface EvidencePayload {
   };
 }
 
+export interface ContextXRayPayload {
+  version: number;
+  evidence: EvidencePayload | null;
+}
+
 export interface ChatStreamDeltaEvent {
   type: "delta";
   text: string;
@@ -202,6 +231,7 @@ export interface ChatMessageDto {
   content: string;
   model?: string | null;
   created_at: string;
+  context_xray?: ContextXRayPayload | null;
 }
 
 export interface ChatSessionSummary {
@@ -229,6 +259,44 @@ export interface ChatAction {
   created_at: string;
   applied_at?: string | null;
   undone_at?: string | null;
+}
+
+export interface GraphBlastRadiusNode {
+  id: string;
+  label: string;
+  change: "create" | "update" | "delete" | "touch" | string;
+  role: "anchor" | "related" | string;
+  in_current_graph: boolean;
+}
+
+export interface GraphBlastRadiusEdge {
+  key: string;
+  source: string;
+  target: string;
+  relation: string;
+  change: "add" | "update" | "delete" | string;
+  in_current_graph: boolean;
+}
+
+export interface GraphBlastRadiusPreview {
+  source: string;
+  action_type: string;
+  chapter_index: number | null;
+  nodes: GraphBlastRadiusNode[];
+  edges: GraphBlastRadiusEdge[];
+  summary: {
+    nodes: Record<string, number>;
+    edges: Record<string, number>;
+  };
+  notes: string[];
+  graph_effect?: string;
+  projection_sources?: string[];
+  preview_edges?: Array<{
+    source: string;
+    relation: string;
+    target: string;
+    change?: string;
+  }>;
 }
 
 export interface ActionAuditLog {

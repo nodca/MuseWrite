@@ -33,6 +33,7 @@ Docker compose 下这是 build-time 变量（会注入静态资源构建），�
 - Session management (switch / rename / delete)
 - Writing workspace (chapter editor + scene beat context)
 - Assistant action loop (`应用并记录 / 拒绝 / 撤销`) with logs
+- Context X-Ray (hover/focus assistant replies to inspect per-message `evidence` and project fallback snippets)
 - Prompt & knowledge panel (templates + settings/cards injection)
 
 More product-level usage details: `docs/author-manual.md`
