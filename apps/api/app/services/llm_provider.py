@@ -7,6 +7,7 @@ from threading import Lock
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import settings
 
@@ -82,6 +83,14 @@ class ToTGenerationResult:
     recommended: str | None
     rationale: str
     usage: dict[str, Any]
+
+
+@dataclass
+class StructuredGenerationResult:
+    parsed: BaseModel | None
+    raw_content: str
+    usage: dict[str, Any]
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -1700,3 +1709,126 @@ async def generate_chat(
         "temperature_source": temperature_source,
     }
     return stub
+
+
+def generate_structured_sync(
+    user_input: str,
+    *,
+    output_model: type[BaseModel],
+    schema_name: str,
+    context: dict[str, Any] | None = None,
+    model_override: str | None = None,
+    temperature_override: float | None = None,
+    runtime_config: dict[str, Any] | ModelRuntimeConfig | None = None,
+) -> StructuredGenerationResult:
+    runtime = _normalize_runtime_config(runtime_config)
+    provider = (
+        _normalize_runtime_provider(runtime.provider)
+        if runtime
+        else (settings.llm_provider or "stub").strip().lower()
+    )
+    if provider not in {"openai_compatible", "deepseek"}:
+        raise ValueError(f"provider={provider} is not supported for structured sync generation")
+
+    if provider == "deepseek":
+        api_key = str((runtime.api_key if runtime else None) or settings.deepseek_api_key or settings.llm_api_key or "").strip()
+        base_url = str((runtime.base_url if runtime else None) or settings.deepseek_base_url or settings.llm_base_url).rstrip("/")
+        model = model_override or (runtime.model if runtime else None) or settings.deepseek_model or settings.llm_model
+    else:
+        api_key = str((runtime.api_key if runtime else None) or settings.llm_api_key or "").strip()
+        base_url = str((runtime.base_url if runtime else None) or settings.llm_base_url).rstrip("/")
+        model = model_override or (runtime.model if runtime else None) or settings.llm_model
+
+    if not api_key:
+        raise ValueError(f"API key is required for provider={provider}")
+
+    endpoint = base_url + "/chat/completions"
+    raw_prompt = False
+    system_prompt = ""
+    if isinstance(context, dict):
+        raw_prompt = bool(context.get("raw_prompt"))
+        system_prompt = str(context.get("system", "") or "").strip()
+    if not system_prompt:
+        system_prompt = (
+            "你是一个结构化输出器。请严格输出符合给定 JSON Schema 的 JSON 对象，"
+            "不要 Markdown，不要代码块，不要额外文本。"
+        )
+
+    try:
+        schema: dict[str, Any] = output_model.model_json_schema()
+    except Exception as exc:
+        raise ValueError(f"output_model must be a Pydantic BaseModel: {exc}") from exc
+
+    schema_title = str(schema_name or "").strip() or "structured_output"
+    system_prompt = system_prompt + "\n\n【Schema】\n" + f"schema_name={schema_title}\n" + _stable_json_dumps(schema)
+
+    if raw_prompt:
+        user_text = str(user_input or "").strip()
+    else:
+        user_text = "请基于以下输入生成符合 schema 的 JSON：\n" + str(user_input or "").strip()
+
+    temperature = (
+        _clamp_temperature(float(temperature_override))
+        if isinstance(temperature_override, (int, float))
+        else _clamp_temperature(settings.llm_temperature_action)
+    )
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": temperature,
+        "stream": False,
+        "response_format": {"type": "json_object"},
+        "max_tokens": int(settings.llm_max_output_tokens),
+    }
+    body["enable_thinking"] = False
+    body["chat_template_kwargs"] = {"enable_thinking": False}
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout = httpx.Timeout(float(settings.llm_timeout_seconds))
+
+    raw_content = ""
+    usage: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "temperature": temperature,
+    }
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(endpoint, json=body, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
+        usage_raw = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        usage.update(
+            {
+                "prompt_tokens": usage_raw.get("prompt_tokens"),
+                "completion_tokens": usage_raw.get("completion_tokens"),
+                "total_tokens": usage_raw.get("total_tokens"),
+            }
+        )
+        raw_content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
+
+    cleaned = _strip_reasoning_content(raw_content)
+    parsed_dict = _extract_json_content(cleaned)
+    if not parsed_dict:
+        return StructuredGenerationResult(
+            parsed=None,
+            raw_content=raw_content,
+            usage={**usage, "raw_response_format": "non_json"},
+            error="invalid_json",
+        )
+
+    try:
+        parsed = output_model.model_validate(parsed_dict)
+    except ValidationError as exc:
+        code = exc.errors()[0].get("type") if exc.errors() else "unknown"
+        return StructuredGenerationResult(
+            parsed=None,
+            raw_content=raw_content,
+            usage=usage,
+            error=f"validation_error:{code}",
+        )
+
+    return StructuredGenerationResult(parsed=parsed, raw_content=raw_content, usage=usage)
