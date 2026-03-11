@@ -51,6 +51,7 @@ LLM_PROVIDER=stub
 LLM_MODEL=gpt-4o-mini
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=
+LLM_STRUCTURED_MODE=strict  # strict | compat
 
 LIGHTRAG_ENABLED=false
 LIGHTRAG_BASE_URL=http://localhost:9621
@@ -133,6 +134,10 @@ Prompt design (NovelForge-inspired, adapted):
   - `assistant_text`
   - `proposed_actions`
 - `proposed_actions` are **suggestions only** and require explicit user confirm via action APIs.
+- Provider contract is centralized in `generate_structured_sync()`:
+  - `strict` mode prefers `json_schema` / tool calling and fails fast when the provider cannot comply.
+  - `compat` mode is opt-in and only exists for `openai_compatible` endpoints that still lack both `json_schema` and tool calling.
+  - compat fallback still does not use regex extraction; the server only accepts pure JSON or a single fenced JSON block, then validates it with Pydantic.
 - Model receives compact workspace context:
   - recent chat messages
   - settings preview
@@ -150,6 +155,7 @@ Prompt design (NovelForge-inspired, adapted):
 
 - `POST /api/chat/stream`
 - `POST /api/chat/ghost-text`
+- `WS /api/chat/ghost-text`
 - `GET /api/chat/projects/{project_id}/sessions`
 - `PUT /api/chat/projects/{project_id}/sessions/{session_id}`
 - `DELETE /api/chat/projects/{project_id}/sessions/{session_id}`
@@ -229,6 +235,13 @@ Note: `evidence` is persisted per assistant message as `context_xray` and is ret
   "scene_beat_id": 3
 }
 ```
+
+Ghost Text WebSocket auth note:
+
+- Browser clients cannot attach custom `Authorization` headers during the WebSocket handshake.
+- The web app therefore forwards `VITE_API_TOKEN` via `?token=` on `WS /api/chat/ghost-text`.
+- API treats that token the same as `Authorization: Bearer <token>`.
+- Current streaming provider support is `openai_compatible` / `deepseek`; other providers should keep using the non-streaming rewrite endpoints until a native WS path is added.
 
 `POST /api/chat/stream` supports runtime options:
 

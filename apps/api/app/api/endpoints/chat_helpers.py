@@ -7,6 +7,7 @@ from sqlmodel import Session
 from app.core.auth import AuthPrincipal, ensure_project_access
 from app.core.config import settings
 from app.services.chat_service import (
+    build_action_blast_radius_preview,
     create_action,
     create_action_audit_log,
     get_action_by_id,
@@ -58,12 +59,24 @@ def create_proposed_actions(
 ) -> list[int]:
     provenance_payload = provenance or {}
     action_ids: list[int] = []
+    session = get_session_by_id(db, session_id)
+    project_id = int(session.project_id) if session is not None else 0
     for item in proposed_actions:
         action_type = item.get("action_type")
         payload = item.get("payload")
         if not isinstance(action_type, str) or not isinstance(payload, dict):
             continue
         action_payload = dict(payload)
+        if project_id > 0:
+            blast_radius = build_action_blast_radius_preview(
+                db,
+                project_id=project_id,
+                action_type=action_type,
+                payload=action_payload,
+                provenance=provenance_payload,
+            )
+            if isinstance(blast_radius, dict):
+                action_payload["_graph_blast_radius"] = blast_radius
         if provenance_payload:
             action_payload["_provenance"] = provenance_payload
         action = create_action(

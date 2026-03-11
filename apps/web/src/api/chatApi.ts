@@ -16,6 +16,8 @@ import type {
   GraphTimelineSnapshot,
   GhostTextRewriteRequest,
   GhostTextResponse,
+  GhostTextStreamEvent,
+  GhostTextStreamRequest,
   ModelProfile,
   ModelProfileDeleteResult,
   ModelProfileUpsertPayload,
@@ -53,6 +55,19 @@ const SWR_CACHE_RULES: Array<{ pattern: RegExp; ttlMs: number }> = [
 
 const EXPIRED_LOGIN_MESSAGE = "登录已过期，请重新登录";
 const LIGHTRAG_TIMEOUT_MESSAGE = "AI 服务响应较慢，已切换到本地模式";
+
+function resolveWebSocketUrl(path: string): string {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  const base =
+    API_BASE && /^https?:\/\//i.test(API_BASE)
+      ? API_BASE
+      : typeof window !== "undefined"
+        ? window.location.origin
+        : "http://localhost";
+  const url = new URL(normalized, base);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
 
 function authHeaders(): Record<string, string> {
   if (!API_TOKEN) return {};
@@ -294,6 +309,7 @@ export async function streamChat(
   let buffer = "";
   let firstEventMs: number | null = null;
   let firstTokenMs: number | null = null;
+  let terminalEventSeen = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -312,12 +328,17 @@ export async function streamChat(
           firstTokenMs = nowMs() - startedAt;
         }
         onEvent(parsed);
+        if (parsed.type === "done" || parsed.type === "error") {
+          terminalEventSeen = true;
+          break;
+        }
       }
       boundaryIndex = buffer.indexOf("\n\n");
     }
+    if (terminalEventSeen) break;
   }
 
-  if (buffer.trim()) {
+  if (!terminalEventSeen && buffer.trim()) {
     const parsed = parseSseEventBlock(buffer);
     if (parsed) {
       if (firstEventMs === null) {
@@ -327,6 +348,14 @@ export async function streamChat(
         firstTokenMs = nowMs() - startedAt;
       }
       onEvent(parsed);
+    }
+  }
+
+  if (terminalEventSeen) {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore cancellation failures
     }
   }
 
@@ -350,6 +379,49 @@ export function generateGhostExpand(payload: GhostTextRewriteRequest): Promise<G
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function openGhostTextSocket(
+  onEvent: (event: GhostTextStreamEvent) => void,
+  options?: {
+    onOpen?: () => void;
+    onClose?: () => void;
+    onError?: () => void;
+  }
+): WebSocket {
+  const url = new URL(resolveWebSocketUrl("/api/chat/ghost-text"));
+  if (API_TOKEN) {
+    // Browsers cannot set custom headers for WebSocket handshakes. Carry the
+    // existing dev token in the query string so the API can authenticate.
+    url.searchParams.set("token", API_TOKEN);
+  }
+  const socket = new WebSocket(url.toString());
+  socket.addEventListener("open", () => options?.onOpen?.());
+  socket.addEventListener("close", () => options?.onClose?.());
+  socket.addEventListener("error", () => options?.onError?.());
+  socket.addEventListener("message", (event) => {
+    try {
+      const parsed = JSON.parse(String(event.data ?? "{}")) as GhostTextStreamEvent;
+      if (!parsed || typeof parsed !== "object") return;
+      if (
+        parsed.type !== "start" &&
+        parsed.type !== "delta" &&
+        parsed.type !== "done" &&
+        parsed.type !== "error"
+      ) {
+        return;
+      }
+      onEvent(parsed);
+    } catch {
+      // ignore malformed events
+    }
+  });
+  return socket;
+}
+
+export function sendGhostTextStreamRequest(socket: WebSocket, payload: GhostTextStreamRequest): void {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(payload));
 }
 
 export function getSessionMessages(sessionId: number): Promise<ChatMessageDto[]> {

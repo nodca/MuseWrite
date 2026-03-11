@@ -218,6 +218,7 @@ LLM_PROVIDER=stub
 LLM_MODEL=gpt-4o-mini
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_API_KEY=
+LLM_STRUCTURED_MODE=strict
 
 LIGHTRAG_ENABLED=false
 LIGHTRAG_BASE_URL=http://lightrag:9621
@@ -256,6 +257,15 @@ CONTEXT_COMPRESSION_MODE=rerank
   - `AUTH_TOKENS=local-user:<token>`
   - `VITE_API_TOKEN=<token>`
 - 默认示例 token `local-dev-token` 仅限本地开发使用。
+- 浏览器 WebSocket 不能自定义 `Authorization` header；Ghost Text 流式补全会把同一个 `VITE_API_TOKEN` 挂到 `?token=` 查询参数上，API 端会等价校验。
+
+### Structured Outputs 与 Ghost Text 约定
+
+- `LLM_STRUCTURED_MODE` 默认是 `strict`：优先走 `json_schema` / tool calling，拿不到结构化响应就快速失败，不再做正则抠 JSON。
+- 只有显式设置为 `compat` 时，`openai_compatible`/兼容 OpenAI 协议但不支持 `json_schema`、tool calling 的供应商，才允许降级到 `response_format={"type":"json_object"}`。
+- 即使在 `compat` 模式下，服务端也只接受“纯 JSON”或“单个 fenced JSON block”，再交给 Pydantic 校验，不接受自由文本混排 JSON。
+- Ghost Text 自动补全当前走 WebSocket 流式推送；浏览器侧在停顿后请求建议，`Tab` 接受整段，`Ctrl+ArrowRight` 接受一个词。
+- Tiptap 润色/扩写不会直接覆盖正文，而是渲染 Git-style Diff：删除为红色删除线，新增为绿色高亮，每条修改都可单独“接受/忽略”。
 
 ---
 

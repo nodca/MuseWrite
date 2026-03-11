@@ -4,11 +4,12 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-import httpx
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.core.config import settings
 from app.models.content import ForeshadowingCard, ProjectChapter, SettingEntry
+from app.services.llm_provider import generate_structured_sync
 from app.services.retrieval_adapters import fetch_neo4j_graph_facts
 
 _CONSISTENCY_AUDIT_REPORT_PREFIX = "consistency.audit.report."
@@ -25,6 +26,19 @@ def _truncate_text(value: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "..."
 
 
+class ConsistencyJudgeIssue(BaseModel):
+    type: str = Field(default="continuity_risk")
+    severity: str = Field(default="medium")
+    title: str = ""
+    detail: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    suggestion: str = ""
+
+
+class ConsistencyJudgeOutput(BaseModel):
+    issues: list[ConsistencyJudgeIssue] = Field(default_factory=list)
+
+
 def _coerce_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -38,27 +52,6 @@ def _coerce_datetime(value: Any) -> datetime | None:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     return None
-
-
-def _extract_json_object(raw: str) -> dict[str, Any] | None:
-    text = (raw or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-        return parsed if isinstance(parsed, dict) else None
-    except Exception:
-        pass
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _normalize_reason(value: str | None) -> str:
@@ -415,64 +408,52 @@ def _call_consistency_judge_llm(
         for item in graph_facts[:8]
         if isinstance(item, dict)
     ]
-    endpoint = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是小说一致性审计器。请识别当前章节与图谱事实的冲突风险。"
-                    "仅输出 JSON: "
-                    "{\"issues\":[{\"type\":\"temporal_conflict|continuity_risk|foreshadow_overdue\","
-                    "\"severity\":\"high|medium|low\","
-                    "\"title\":\"...\",\"detail\":\"...\","
-                    "\"evidence\":{\"fact\":\"...\"},"
-                    "\"suggestion\":\"...\"}]}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "chapter_id": chapter_id,
-                        "chapter_index": chapter_index,
-                        "chapter_title": chapter_title,
-                        "chapter_preview": chapter_preview,
-                        "graph_facts": graph_preview,
-                        "max_items": max_items,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
+
+    system_prompt = (
+        "你是小说一致性审计器。请识别当前章节与图谱事实的冲突风险，严格输出符合 schema 的 JSON。"
+    )
+    prompt_payload = {
+        "chapter_id": chapter_id,
+        "chapter_index": chapter_index,
+        "chapter_title": chapter_title,
+        "chapter_preview": chapter_preview,
+        "graph_facts": graph_preview,
+        "max_items": max_items,
     }
-    headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        timeout = httpx.Timeout(float(settings.consistency_audit_llm_timeout_seconds))
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
+        structured = generate_structured_sync(
+            json.dumps(prompt_payload, ensure_ascii=False),
+            output_model=ConsistencyJudgeOutput,
+            schema_name="consistency_audit_judge_output",
+            context={"system": system_prompt, "raw_prompt": True},
+            runtime_config={
+                "provider": "openai_compatible",
+                "base_url": base_url,
+                "api_key": api_key,
+                "model": model,
+            },
+            temperature_override=0.0,
+            timeout_seconds_override=float(settings.consistency_audit_llm_timeout_seconds),
+        )
     except Exception:
         return []
 
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
-    parsed = _extract_json_object(content)
+    parsed = structured.parsed
     if not parsed:
         return []
-    raw_issues = parsed.get("issues")
+    raw_issues = getattr(parsed, "issues", None)
     if not isinstance(raw_issues, list):
         return []
 
     issues: list[dict[str, Any]] = []
     for item in raw_issues:
-        if not isinstance(item, dict):
+        if isinstance(item, BaseModel):
+            item_dict = item.model_dump()
+        elif isinstance(item, dict):
+            item_dict = item
+        else:
             continue
-        normalized = _normalize_issue(item, chapter_id=chapter_id, chapter_index=chapter_index)
+        normalized = _normalize_issue(item_dict, chapter_id=chapter_id, chapter_index=chapter_index)
         if not normalized:
             continue
         issues.append(normalized)

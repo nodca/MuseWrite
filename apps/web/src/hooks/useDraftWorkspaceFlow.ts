@@ -136,7 +136,7 @@ export function useDraftWorkspaceFlow({
   loadChapterSnapshot,
 }: UseDraftWorkspaceFlowArgs) {
   const isDraftDirty = useCallback(() => {
-    const currentTitle = draftTitle.trim() || "未命名章节";
+    const currentTitle = String(draftTitle ?? "").trim() || "未命名章节";
     const snapshot = lastSavedDraftRef.current;
     return (
       snapshot.chapterId !== activeChapterId ||
@@ -164,7 +164,7 @@ export function useDraftWorkspaceFlow({
         setGhostError(null);
       }
       try {
-        const normalizedTitle = draftTitle.trim() || "未命名章节";
+        const normalizedTitle = String(draftTitle ?? "").trim() || "未命名章节";
         const saved = await saveProjectChapter(projectId, activeChapterId, {
           title: normalizedTitle,
           content: draftText,
@@ -314,7 +314,7 @@ export function useDraftWorkspaceFlow({
       writeDraftRecoverySnapshot({
         project_id: projectId,
         chapter_id: activeChapterId,
-        title: draftTitle.trim() || "未命名章节",
+        title: String(draftTitle ?? "").trim() || "未命名章节",
         content: draftText,
         base_version: draftVersion,
         saved_at: new Date().toISOString(),

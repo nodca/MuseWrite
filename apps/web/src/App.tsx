@@ -1,4 +1,4 @@
-import { Suspense, lazy, memo, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Extension } from "@tiptap/core";
 import Placeholder from "@tiptap/extension-placeholder";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -810,6 +810,197 @@ function buildBlastRadiusSummaryChips(preview: GraphBlastRadiusPreview | null): 
   return chips;
 }
 
+function formatBlastRadiusMarkdown(preview: GraphBlastRadiusPreview | null, title: string): string {
+  const heading = String(title || "").trim();
+  const lines: string[] = [];
+  if (heading) lines.push(`# ${heading}`);
+  if (!preview) {
+    lines.push("");
+    lines.push("（无图谱爆炸半径预览）");
+    return lines.join("\n");
+  }
+  const summary = summarizeBlastRadius(preview);
+  if (summary) lines.push(`- 摘要：${summary}`);
+  if (preview.action_type) lines.push(`- 动作：${preview.action_type}`);
+  if (preview.chapter_index !== null) lines.push(`- 章节：${preview.chapter_index}`);
+  if (preview.source) lines.push(`- 来源：${preview.source}`);
+  if (preview.notes?.[0]) lines.push(`- 备注：${preview.notes[0]}`);
+
+  lines.push("");
+  lines.push("## 节点");
+  if ((preview.nodes ?? []).length === 0) {
+    lines.push("- （无）");
+  } else {
+    preview.nodes.forEach((node) => {
+      const tone = resolveBlastRadiusTone(node.change);
+      const existsLabel = node.in_current_graph ? "已存在" : "投影";
+      const role = String(node.role || "related");
+      lines.push(`- [${tone}] ${node.label} (${role} · ${existsLabel})`);
+    });
+  }
+
+  lines.push("");
+  lines.push("## 边");
+  if ((preview.edges ?? []).length === 0) {
+    lines.push("- （无）");
+  } else {
+    preview.edges.forEach((edge) => {
+      const tone = resolveBlastRadiusTone(edge.change);
+      const existsLabel = edge.in_current_graph ? "已存在" : "投影";
+      lines.push(`- [${tone}] ${edge.source} -[${edge.relation}]-> ${edge.target} (${existsLabel})`);
+    });
+  }
+
+  return lines.join("\n");
+}
+
+type BlastRadiusDetailDisclosureProps = {
+  preview: GraphBlastRadiusPreview | null;
+  resetKey: unknown;
+  summaryLabel?: string;
+  className?: string;
+  maxNodes?: number;
+  maxEdges?: number;
+};
+
+const BlastRadiusDetailDisclosure = memo(function BlastRadiusDetailDisclosure({
+  preview,
+  resetKey,
+  summaryLabel = "查看明细",
+  className = "blast-radius-detail",
+  maxNodes = 80,
+  maxEdges = 120,
+}: BlastRadiusDetailDisclosureProps) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "add" | "update" | "delete">("all");
+
+  const nodeItems = preview?.nodes ?? [];
+  const edgeItems = preview?.edges ?? [];
+  const token = query.trim().toLowerCase();
+
+  const filteredNodes = useMemo(() => {
+    if (!token && filter === "all") return nodeItems;
+    return nodeItems.filter((item) => {
+      const tone = resolveBlastRadiusTone(item.change);
+      if (filter !== "all" && tone !== filter) return false;
+      if (!token) return true;
+      const label = String(item.label || item.id || "").toLowerCase();
+      const id = String(item.id || "").toLowerCase();
+      const role = String(item.role || "").toLowerCase();
+      return label.includes(token) || id.includes(token) || role.includes(token);
+    });
+  }, [filter, nodeItems, token]);
+
+  const filteredEdges = useMemo(() => {
+    if (!token && filter === "all") return edgeItems;
+    return edgeItems.filter((item) => {
+      const tone = resolveBlastRadiusTone(item.change);
+      if (filter !== "all" && tone !== filter) return false;
+      if (!token) return true;
+      const source = String(item.source || "").toLowerCase();
+      const target = String(item.target || "").toLowerCase();
+      const relation = String(item.relation || "").toLowerCase();
+      return source.includes(token) || target.includes(token) || relation.includes(token);
+    });
+  }, [edgeItems, filter, token]);
+
+  useEffect(() => {
+    setQuery("");
+    setFilter("all");
+    setOpen(false);
+  }, [resetKey]);
+
+  if (!preview) return null;
+
+  return (
+    <details className={className} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>{summaryLabel}</summary>
+      <div className="blast-radius-detail-controls">
+        <label className="timeline-filter-field">
+          <span>检索</span>
+          <input
+            type="search"
+            placeholder="节点/关系/角色"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <label className="timeline-filter-field">
+          <span>变更</span>
+          <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
+            <option value="all">全部</option>
+            <option value="add">新增</option>
+            <option value="update">更新/波及</option>
+            <option value="delete">删除</option>
+          </select>
+        </label>
+      </div>
+      <div className="blast-radius-detail-grid">
+        <section className="blast-radius-detail-section">
+          <div className="blast-radius-detail-head">
+            <strong>{`节点 ${filteredNodes.length}/${nodeItems.length}`}</strong>
+            <small>点击可复制标题</small>
+          </div>
+          <div className="blast-radius-detail-list">
+            {nodeItems.length === 0 ? <p className="empty">暂无节点变更</p> : null}
+            {nodeItems.length > 0 && filteredNodes.length === 0 ? <p className="empty">筛选后无节点命中</p> : null}
+            {filteredNodes.slice(0, maxNodes).map((item) => {
+              const tone = resolveBlastRadiusTone(item.change);
+              const existsLabel = item.in_current_graph ? "已存在" : "投影";
+              const roleLabel = String(item.role || "related");
+              return (
+                <button
+                  key={`${item.id}:${item.label}:${roleLabel}`}
+                  type="button"
+                  className={`blast-radius-detail-row tone-${tone}`}
+                  onClick={() => void navigator.clipboard?.writeText(item.label || item.id)}
+                >
+                  <span className="label">{item.label}</span>
+                  <small>{`${roleLabel} · ${existsLabel}`}</small>
+                </button>
+              );
+            })}
+            {filteredNodes.length > maxNodes ? (
+              <p className="empty">{`已截断展示明细：仅显示前 ${maxNodes} 条（当前命中 ${filteredNodes.length} 条）`}</p>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="blast-radius-detail-section">
+          <div className="blast-radius-detail-head">
+            <strong>{`边 ${filteredEdges.length}/${edgeItems.length}`}</strong>
+            <small>点击可复制三元组</small>
+          </div>
+          <div className="blast-radius-detail-list">
+            {edgeItems.length === 0 ? <p className="empty">暂无关系变更</p> : null}
+            {edgeItems.length > 0 && filteredEdges.length === 0 ? <p className="empty">筛选后无关系命中</p> : null}
+            {filteredEdges.slice(0, maxEdges).map((item) => {
+              const tone = resolveBlastRadiusTone(item.change);
+              const existsLabel = item.in_current_graph ? "已存在" : "投影";
+              const triple = `${item.source} -[${item.relation}]-> ${item.target}`;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`blast-radius-detail-row tone-${tone}`}
+                  onClick={() => void navigator.clipboard?.writeText(triple)}
+                >
+                  <span className="label">{triple}</span>
+                  <small>{existsLabel}</small>
+                </button>
+              );
+            })}
+            {filteredEdges.length > maxEdges ? (
+              <p className="empty">{`已截断展示明细：仅显示前 ${maxEdges} 条（当前命中 ${filteredEdges.length} 条）`}</p>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    </details>
+  );
+});
+
 function diffValuePreview(value: unknown, maxLength = 220): string {
   let serialized = "";
   if (value === undefined) {
@@ -1162,7 +1353,6 @@ type ActionCardProps = {
   controlsDisabled: boolean;
   onLoadLogs: (actionId: number) => Promise<void>;
   onPreviewEnter: (actionId: number) => void;
-  onPreviewLeave: () => void;
   onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
 };
 
@@ -1173,7 +1363,6 @@ const ActionCard = memo(function ActionCard({
   controlsDisabled,
   onLoadLogs,
   onPreviewEnter,
-  onPreviewLeave,
   onMutateAction,
 }: ActionCardProps) {
   const actionIntent = useMemo(() => resolveActionIntent(action.action_type), [action.action_type]);
@@ -1184,10 +1373,17 @@ const ActionCard = memo(function ActionCard({
   const blastRadius = useMemo(() => getActionBlastRadius(action), [action]);
   const blastRadiusSummary = useMemo(() => summarizeBlastRadius(blastRadius), [blastRadius]);
   const canPreviewBlastRadius = action.status === "proposed" && blastRadius !== null;
+  const blastRadiusChips = useMemo(() => buildBlastRadiusSummaryChips(blastRadius), [blastRadius]);
+  const [applyConfirmOpen, setApplyConfirmOpen] = useState(false);
   const diffRows = useMemo(() => buildActionDiffRows(action), [action]);
   const [undoFlash, setUndoFlash] = useState(false);
   const previousStatusRef = useRef(action.status);
   const undoFlashTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (action.status === "proposed") return;
+    setApplyConfirmOpen(false);
+  }, [action.status]);
 
   useEffect(() => {
     const previousStatus = previousStatusRef.current;
@@ -1223,17 +1419,8 @@ const ActionCard = memo(function ActionCard({
       onMouseEnter={() => {
         if (canPreviewBlastRadius) onPreviewEnter(action.id);
       }}
-      onMouseLeave={() => {
-        if (canPreviewBlastRadius) onPreviewLeave();
-      }}
       onFocusCapture={() => {
         if (canPreviewBlastRadius) onPreviewEnter(action.id);
-      }}
-      onBlurCapture={(event) => {
-        if (!canPreviewBlastRadius) return;
-        const nextTarget = event.relatedTarget;
-        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
-        onPreviewLeave();
       }}
     >
       <button type="button" className="action-summary" onClick={() => void onLoadLogs(action.id)}>
@@ -1317,13 +1504,35 @@ const ActionCard = memo(function ActionCard({
       <div className="action-ops">
         {action.status === "proposed" ? (
           <>
-            <button
-              className="btn primary tiny"
-              onClick={() => void onMutateAction(action, "apply")}
-              disabled={controlsDisabled}
-            >
-              应用到项目
-            </button>
+            {applyConfirmOpen ? (
+              <>
+                <button
+                  className="btn primary tiny"
+                  onClick={() => void onMutateAction(action, "apply")}
+                  disabled={controlsDisabled}
+                >
+                  确认应用
+                </button>
+                <button
+                  className="btn ghost tiny"
+                  onClick={() => setApplyConfirmOpen(false)}
+                  disabled={controlsDisabled}
+                >
+                  取消
+                </button>
+              </>
+            ) : (
+              <button
+                className="btn primary tiny"
+                onClick={() => {
+                  setApplyConfirmOpen(true);
+                  if (canPreviewBlastRadius) onPreviewEnter(action.id);
+                }}
+                disabled={controlsDisabled}
+              >
+                应用到项目
+              </button>
+            )}
             <button
               className="btn ghost tiny"
               onClick={() => void onMutateAction(action, "reject")}
@@ -1345,6 +1554,59 @@ const ActionCard = memo(function ActionCard({
       </div>
       {action.status === "proposed" ? (
         <p className="action-risk-line">应用后会立即写入设定/卡片，并记录审计日志。</p>
+      ) : null}
+      {action.status === "proposed" && applyConfirmOpen ? (
+        <div className="action-apply-confirm" aria-live="polite">
+          <div className="action-apply-confirm-head">
+            <strong>应用前总览</strong>
+            <small>确认前不会写入项目</small>
+          </div>
+          {blastRadius ? (
+            <div className="blast-radius-summary">
+              {blastRadiusChips.length > 0
+                ? blastRadiusChips.map((item) => (
+                    <span key={item.key} className={`blast-radius-chip is-${item.tone}`}>
+                      {item.label}
+                    </span>
+                  ))
+                : <span className="blast-radius-chip is-update">仅锚点波及</span>}
+            </div>
+          ) : (
+            <p className="empty">当前动作未提供图谱爆炸半径预览</p>
+          )}
+
+          {blastRadius ? (
+            <>
+              <div className="action-apply-confirm-actions">
+                <button
+                  type="button"
+                  className="btn ghost tiny"
+                  onClick={() =>
+                    void navigator.clipboard?.writeText(
+                      formatBlastRadiusMarkdown(blastRadius, `动作 #${action.id} · ${action.action_type}`)
+                    )
+                  }
+                >
+                  复制清单
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost tiny"
+                  onClick={() => void navigator.clipboard?.writeText(formatJson(blastRadius))}
+                >
+                  复制 JSON
+                </button>
+              </div>
+
+              <BlastRadiusDetailDisclosure
+                preview={blastRadius}
+                resetKey={`${action.id}:${action.status}`}
+                summaryLabel="查看图谱明细"
+                className="blast-radius-detail action-apply-detail"
+              />
+            </>
+          ) : null}
+        </div>
       ) : null}
     </article>
   );
@@ -2170,6 +2432,7 @@ const SettingsDialog = memo(function SettingsDialog({
   );
 });
 
+// TODO(blast-radius): Apply 前总览确认区块（two-step apply）将在此处复用 blast radius 明细组件。
 type AssistantActionsPanelProps = {
   sortedActions: ChatAction[];
   pendingActionIds: number[];
@@ -2314,12 +2577,19 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
     timelineNodesCount,
     timelineEdgesCount,
     hasTimelineFilter,
+    graphNodeLimit,
+    graphEdgeLimit,
+    graphNodesCandidateCount,
+    graphEdgesCandidateCount,
+    graphNodesTruncated,
+    graphEdgesTruncated,
   } = useTimelineGraphFlow({
     graphTimeline,
     graphTimelineChapterIndex,
     maxChapterIndex,
     previewBlastRadius,
   });
+  const graphPreviewTruncated = graphNodesTruncated || graphEdgesTruncated;
   const resolveTraceChapterIndex = (item: ChatStreamTraceEvent): number | null => {
     const metaRecord = item.meta && typeof item.meta === "object" ? (item.meta as Record<string, unknown>) : null;
     const chapterRaw = metaRecord?.chapter_index ?? metaRecord?.current_chapter;
@@ -2343,7 +2613,15 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
     Math.max(1, Math.min(Math.max(1, maxChapterIndex), Math.floor(value)));
 
   return (
-    <section className="panel side-panel">
+    <section
+      className="panel side-panel"
+      onMouseLeave={() => setHoveredActionId(null)}
+      onBlurCapture={(event) => {
+        const nextTarget = event.relatedTarget;
+        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+        setHoveredActionId(null);
+      }}
+    >
       <div className="panel-title">
         <h2>动作提议</h2>
         <small>pending: {pendingActionIds.length}</small>
@@ -2493,9 +2771,12 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
               const previewChange = hasPreviewOverlay
                 ? previewEdgeChangeMap.get(buildGraphPreviewEdgeKey(edge.source, edge.relation, edge.target))
                 : null;
+              const isPreviewGhostEdge = String(edge.id || "").startsWith("preview:");
               const edgeClassName = hasPreviewOverlay
                 ? previewChange
-                  ? `timeline-edge preview-${resolveBlastRadiusTone(previewChange)}`
+                  ? `timeline-edge preview-${resolveBlastRadiusTone(previewChange)}${
+                      isPreviewGhostEdge ? " is-preview-ghost" : ""
+                    }`
                   : "timeline-edge is-dim"
                 : selectedTimelineNodeId
                   ? highlightedEdgeIdSet.has(edge.id)
@@ -2593,8 +2874,18 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
                 </span>
               ))}
             </div>
+            {graphPreviewTruncated ? (
+              <small className="blast-radius-truncation">
+                {`图谱已截断显示：节点仅展示 ${Math.min(graphNodeLimit, graphNodesCandidateCount)}/${graphNodesCandidateCount}，边仅展示 ${Math.min(graphEdgeLimit, graphEdgesCandidateCount)}/${graphEdgesCandidateCount}。可用上方筛选缩小范围。`}
+              </small>
+            ) : null}
             {previewBlastRadiusSummary ? <small>{previewBlastRadiusSummary}</small> : null}
             {previewBlastRadius?.notes?.[0] ? <small>{previewBlastRadius.notes[0]}</small> : null}
+            <BlastRadiusDetailDisclosure
+              preview={previewBlastRadius}
+              resetKey={activeBlastAction?.id ?? "none"}
+              summaryLabel="查看明细"
+            />
           </div>
         ) : selectedTimelineNodeId ? (
           <div className="timeline-focus-bar">
@@ -2622,7 +2913,6 @@ const AssistantActionsPanel = memo(function AssistantActionsPanel({
             controlsDisabled={mutatingActionId !== null}
             onLoadLogs={onLoadLogs}
             onPreviewEnter={setHoveredActionId}
-            onPreviewLeave={() => setHoveredActionId(null)}
             onMutateAction={onMutateAction}
           />
         ))}
@@ -3799,9 +4089,12 @@ export default function App() {
       const shouldRestore = localSnapshot ? shouldRestoreDraftRecovery(localSnapshot, chapter) : false;
       const resolvedTitle = shouldRestore && localSnapshot ? localSnapshot.title : chapter.title;
       const resolvedContent = shouldRestore && localSnapshot ? localSnapshot.content : chapter.content;
+      // Defensive: legacy local snapshots or unexpected API payloads can yield undefined.
+      const nextTitle = typeof resolvedTitle === "string" ? resolvedTitle : "";
+      const nextContent = typeof resolvedContent === "string" ? resolvedContent : "";
 
-      setDraftTitle(resolvedTitle);
-      setDraftText(resolvedContent);
+      setDraftTitle(nextTitle);
+      setDraftText(nextContent);
       setDraftVersion(chapter.version);
       setDraftUpdatedAt(chapter.updated_at);
       setDraftRevisions(revisions);
@@ -3813,8 +4106,8 @@ export default function App() {
       lastSavedDraftRef.current = {
         chapterId: chapter.id,
         volumeId: chapter.volume_id ?? null,
-        title: chapter.title,
-        content: chapter.content,
+        title: typeof chapter.title === "string" ? chapter.title : "",
+        content: typeof chapter.content === "string" ? chapter.content : "",
       };
       if (shouldRestore && localSnapshot) {
         setAutoSaveState("pending");
@@ -4517,7 +4810,7 @@ export default function App() {
 
     if (shouldReplace) {
       const originalText = editor.state.doc.textBetween(from, to, "\n", "\n");
-      const suggestions = buildDiffSuggestions(from, originalText, assistantText);
+      const suggestions = buildDiffSuggestions(from, to, originalText, assistantText);
       editor.commands.setDiffSuggestions(suggestions);
       if (suggestions.length === 0) {
         setError("助手回复与当前选区没有差异。");
@@ -4633,7 +4926,7 @@ export default function App() {
         return;
       }
       const { from, to } = editor.state.selection;
-      const suggestions = buildDiffSuggestions(from, selectedDraftText, nextText);
+      const suggestions = buildDiffSuggestions(from, to, selectedDraftText, nextText);
       editor.commands.setDiffSuggestions(suggestions);
       if (suggestions.length === 0) {
         setError("润色/扩写结果与原文没有差异");
@@ -5166,6 +5459,33 @@ export default function App() {
   }, [uiMode]);
 
   useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom;
+    const onGhostWordShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.altKey || event.shiftKey || event.metaKey) return;
+      if (!event.ctrlKey || event.key !== "ArrowRight") return;
+
+      const state = writingShortcutStateRef.current;
+      if (!state) return;
+      if (state.uiMode !== "writing") return;
+      if (state.assistantDrawerOpen || state.settingsDialogOpen) return;
+      if (!state.activeChapterId) return;
+      if (state.draftLoading || state.draftSaving) return;
+      if (!state.hasGhostText || state.ghostLoading) return;
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      acceptGhostWordRef.current?.();
+    };
+
+    dom.addEventListener("keydown", onGhostWordShortcut, true);
+    return () => {
+      dom.removeEventListener("keydown", onGhostWordShortcut, true);
+    };
+  }, [editor]);
+
+  useEffect(() => {
     if (typeof document === "undefined") return;
     const zenClass = "zen-mode-active";
     document.body.classList.toggle(zenClass, zenMode);
@@ -5174,7 +5494,7 @@ export default function App() {
     };
   }, [zenMode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     actionLogsCacheRef.current.clear();
     actionLogsInFlightRef.current.clear();
     actionLogsRequestSeqRef.current = 0;
@@ -5193,7 +5513,7 @@ export default function App() {
     postChatSnapshotRequestSeqRef.current = 0;
   }, [projectId, sessionId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     projectSnapshotInFlightRef.current.clear();
     projectSnapshotRequestSeqRef.current = 0;
   }, [projectId]);

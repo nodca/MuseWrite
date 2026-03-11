@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Any, Callable
 
 import httpx
+from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from app.core.config import settings
@@ -29,6 +30,7 @@ from app.services.retrieval_adapters import (
     fetch_lightrag_semantic_hits,
     fetch_neo4j_graph_facts,
 )
+from app.services.llm_provider import generate_structured_sync
 
 
 @dataclass
@@ -752,26 +754,25 @@ def _normalize_weight_dict(raw: Any) -> BudgetWeights | None:
     )
 
 
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    content = str(text or "").strip()
-    if not content:
-        return None
-    try:
-        parsed = json.loads(content)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    match = re.search(r"\{[\s\S]*\}", content)
-    if not match:
-        return None
-    try:
-        parsed = json.loads(match.group(0))
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        return None
-    return None
+class _SemanticRouterOutput(BaseModel):
+    intent: str = ""
+    confidence: float = 0.0
+    signals: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class _BudgetRouterOutput(BaseModel):
+    mode: str = ""
+    weights: dict[str, float] = Field(default_factory=dict)
+    confidence: float = 0.0
+
+
+class _SelfReflectiveJudgeOutput(BaseModel):
+    needs_refine: bool = False
+    issues: list[str] = Field(default_factory=list)
+    followup_queries: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    reason: str = ""
 
 
 def _call_semantic_router_llm(
@@ -786,67 +787,54 @@ def _call_semantic_router_llm(
     if not (model and base_url and api_key):
         return None, 0.0, []
 
-    endpoint = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是小说助手的语义路由器。"
-                    "根据用户输入、章节片段、Scene Beat，识别主要意图。"
-                    "intent 仅可取 writing_help|world_query|action_proposal|brainstorm。"
-                    "仅输出 JSON："
-                    "{\"intent\":\"...\",\"confidence\":0-1,\"signals\":[\"...\"],\"reason\":\"...\"}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "user_input": _truncate_text(user_input, 900),
-                        "chapter_preview": _truncate_text(chapter_preview, 700),
-                        "scene_beat": _truncate_text(scene_beat_text, 450),
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
+    system_prompt = (
+        "你是小说助手的语义路由器。"
+        "根据用户输入、章节片段、Scene Beat，识别主要意图。"
+        "intent 仅可取 writing_help|world_query|action_proposal|brainstorm。"
+    )
+    payload_text = json.dumps(
+        {
+            "user_input": _truncate_text(user_input, 900),
+            "chapter_preview": _truncate_text(chapter_preview, 700),
+            "scene_beat": _truncate_text(scene_beat_text, 450),
+        },
+        ensure_ascii=False,
+    )
     try:
-        timeout = httpx.Timeout(float(settings.semantic_router_llm_timeout_seconds))
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
+        structured = generate_structured_sync(
+            payload_text,
+            output_model=_SemanticRouterOutput,
+            schema_name="semantic_router_output",
+            context={"system": system_prompt, "raw_prompt": True},
+            runtime_config={
+                "provider": "openai_compatible",
+                "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
+            },
+            temperature_override=0.0,
+        )
     except Exception:
         return None, 0.0, []
 
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
-    parsed = _extract_json_object(content)
+    parsed = structured.parsed
     if not parsed:
         return None, 0.0, []
 
-    intent = _normalize_semantic_intent(parsed.get("intent"))
-    confidence = 0.0
+    intent = _normalize_semantic_intent(getattr(parsed, "intent", ""))
     try:
-        confidence = max(0.0, min(float(parsed.get("confidence", 0.0)), 1.0))
+        confidence = max(0.0, min(float(getattr(parsed, "confidence", 0.0) or 0.0), 1.0))
     except Exception:
         confidence = 0.0
-    signals_raw = parsed.get("signals")
+
     signals: list[str] = []
-    if isinstance(signals_raw, list):
-        for item in signals_raw:
-            token = str(item or "").strip()
-            if not token or token in signals:
-                continue
-            signals.append(token[:32])
-            if len(signals) >= 8:
-                break
+    for item in list(getattr(parsed, "signals", []) or [])[:16]:
+        token = str(item or "").strip()
+        if not token or token in signals:
+            continue
+        signals.append(token[:32])
+        if len(signals) >= 8:
+            break
     return intent, confidence, signals
 
 
@@ -954,56 +942,43 @@ def _call_budget_router_llm(
     if not (model and base_url and api_key):
         return None, None, 0.0
 
-    endpoint = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是小说写作系统的上下文预算路由器。"
-                    "请基于输入判定 mode，并分配 dsl/graph/rag/history 权重。"
-                    "只输出 JSON，格式："
-                    "{\"mode\":\"action|investigation|world|dialogue|balanced\","
-                    "\"weights\":{\"dsl\":0-1,\"graph\":0-1,\"rag\":0-1,\"history\":0-1},"
-                    "\"confidence\":0-1}"
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "user_input": _truncate_text(user_input, 800),
-                        "chapter_preview": _truncate_text(chapter_preview, 700),
-                        "scene_beat": _truncate_text(scene_beat_text, 500),
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
+    system_prompt = (
+        "你是小说写作系统的上下文预算路由器。"
+        "请基于输入判定 mode，并分配 dsl/graph/rag/history 权重。"
+    )
+    payload_text = json.dumps(
+        {
+            "user_input": _truncate_text(user_input, 800),
+            "chapter_preview": _truncate_text(chapter_preview, 700),
+            "scene_beat": _truncate_text(scene_beat_text, 500),
+        },
+        ensure_ascii=False,
+    )
     try:
-        timeout = httpx.Timeout(float(settings.budget_router_llm_timeout_seconds))
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
+        structured = generate_structured_sync(
+            payload_text,
+            output_model=_BudgetRouterOutput,
+            schema_name="budget_router_output",
+            context={"system": system_prompt, "raw_prompt": True},
+            runtime_config={
+                "provider": "openai_compatible",
+                "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
+            },
+            temperature_override=0.0,
+        )
     except Exception:
         return None, None, 0.0
 
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
-    parsed = _extract_json_object(content)
+    parsed = structured.parsed
     if not parsed:
         return None, None, 0.0
-    mode = _normalize_budget_mode(parsed.get("mode"))
-    weights = _normalize_weight_dict(parsed.get("weights"))
-    confidence = 0.0
+
+    mode = _normalize_budget_mode(getattr(parsed, "mode", ""))
+    weights = _normalize_weight_dict(getattr(parsed, "weights", {}))
     try:
-        confidence = max(0.0, min(float(parsed.get("confidence", 0.0)), 1.0))
+        confidence = max(0.0, min(float(getattr(parsed, "confidence", 0.0) or 0.0), 1.0))
     except Exception:
         confidence = 0.0
     return mode, weights, confidence
@@ -2959,82 +2934,66 @@ def _call_self_reflective_judge_llm(
         if isinstance(item, dict)
     ]
 
-    endpoint = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是小说上下文审视器（Judge）。"
-                    "任务：检查当前检索是否遗漏关键事实、是否存在时序风险、是否有明显噪声，"
-                    "并判断用户请求是否可能违反 negative_constraints 禁忌约束。"
-                    "只输出 JSON，格式："
-                    "{\"needs_refine\":true|false,"
-                    "\"issues\":[\"missing_key_fact|temporal_risk|noisy_context|negative_constraint_conflict\"],"
-                    "\"followup_queries\":[\"...\"],"
-                    "\"confidence\":0-1,"
-                    "\"reason\":\"...\"}。"
-                    "若命中 negative_constraint_conflict，needs_refine 必须为 true。"
-                    "followup_queries 最多给 2 条，每条短且可直接检索。"
-                ),
+    system_prompt = (
+        "你是小说上下文审视器（Judge）。"
+        "任务：检查当前检索是否遗漏关键事实、是否存在时序风险、是否有明显噪声，"
+        "并判断用户请求是否可能违反 negative_constraints 禁忌约束。"
+        "若命中 negative_constraint_conflict，needs_refine 必须为 true。"
+        "followup_queries 最多给 2 条，每条短且可直接检索。"
+    )
+    payload_text = json.dumps(
+        {
+            "intent": intent,
+            "temperature_profile": temperature_profile,
+            "user_input": _truncate_text(user_input, 820),
+            "chapter_preview": _truncate_text(chapter_preview, 540),
+            "scene_beat": _truncate_text(scene_beat_text, 360),
+            "retrieved": {
+                "dsl": dsl_preview,
+                "graph": graph_preview,
+                "rag": rag_preview,
+                "negative_constraints": negative_preview,
             },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "intent": intent,
-                        "temperature_profile": temperature_profile,
-                        "user_input": _truncate_text(user_input, 820),
-                        "chapter_preview": _truncate_text(chapter_preview, 540),
-                        "scene_beat": _truncate_text(scene_beat_text, 360),
-                        "retrieved": {
-                            "dsl": dsl_preview,
-                            "graph": graph_preview,
-                            "rag": rag_preview,
-                            "negative_constraints": negative_preview,
-                        },
-                        "max_queries": max(max_queries, 1),
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ],
-        "temperature": 0,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
+            "max_queries": max(max_queries, 1),
+        },
+        ensure_ascii=False,
+    )
     try:
-        timeout = httpx.Timeout(float(settings.self_reflective_llm_timeout_seconds))
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
+        structured = generate_structured_sync(
+            payload_text,
+            output_model=_SelfReflectiveJudgeOutput,
+            schema_name="self_reflective_judge_output",
+            context={"system": system_prompt, "raw_prompt": True},
+            runtime_config={
+                "provider": "openai_compatible",
+                "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
+            },
+            temperature_override=0.0,
+        )
     except Exception:
         return None
 
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
-    parsed = _extract_json_object(content)
+    parsed = structured.parsed
     if not parsed:
         return None
-    needs_refine = bool(parsed.get("needs_refine"))
-    confidence = 0.0
+
+    needs_refine = bool(getattr(parsed, "needs_refine", False))
     try:
-        confidence = max(0.0, min(float(parsed.get("confidence", 0.0)), 1.0))
+        confidence = max(0.0, min(float(getattr(parsed, "confidence", 0.0) or 0.0), 1.0))
     except Exception:
         confidence = 0.0
-    issues_raw = parsed.get("issues")
     issues: list[str] = []
-    if isinstance(issues_raw, list):
-        for item in issues_raw:
-            token = str(item or "").strip().lower()
-            if not token or token in issues:
-                continue
-            issues.append(token[:40])
-            if len(issues) >= 6:
-                break
-    followup_queries = _normalize_followup_queries(parsed.get("followup_queries"), limit=max_queries)
+    for item in list(getattr(parsed, "issues", []) or [])[:16]:
+        token = str(item or "").strip().lower()
+        if not token or token in issues:
+            continue
+        issues.append(token[:40])
+        if len(issues) >= 6:
+            break
+
+    followup_queries = _normalize_followup_queries(getattr(parsed, "followup_queries", []), limit=max_queries)
     if "negative_constraint_conflict" in issues and not followup_queries:
         followup_queries = _normalize_followup_queries(
             [_truncate_text(str(user_input or ""), 96) + " 禁忌约束 校验 重写"],

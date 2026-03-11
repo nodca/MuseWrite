@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import hashlib
@@ -7,7 +8,7 @@ from threading import Lock
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
 
@@ -17,6 +18,8 @@ _GEMINI_CONTEXT_CACHE: dict[str, tuple[float, str]] = {}
 _GEMINI_CACHE_LOCK = Lock()
 _PROVIDER_CACHE_STATE: dict[str, dict[str, float]] = {}
 _PROVIDER_CACHE_STATE_LOCK = Lock()
+_STRUCTURED_CAPS: dict[str, dict[str, bool]] = {}
+_STRUCTURED_CAPS_LOCK = Lock()
 
 
 def _cache_state_key(provider: str, endpoint: str, model: str) -> str:
@@ -70,6 +73,26 @@ def _cache_state_record_protocol_error(cache_key: str, *, disable_seconds: int =
         }
 
 
+def _structured_caps_get(cache_key: str, cap: str) -> bool | None:
+    with _STRUCTURED_CAPS_LOCK:
+        entry = _STRUCTURED_CAPS.get(cache_key)
+        if not isinstance(entry, dict):
+            return None
+        value = entry.get(cap)
+        if isinstance(value, bool):
+            return value
+        return None
+
+
+def _structured_caps_set(cache_key: str, cap: str, supported: bool) -> None:
+    with _STRUCTURED_CAPS_LOCK:
+        entry = _STRUCTURED_CAPS.get(cache_key)
+        if not isinstance(entry, dict):
+            entry = {}
+        entry[str(cap)] = bool(supported)
+        _STRUCTURED_CAPS[cache_key] = entry
+
+
 @dataclass
 class ChatGenerationResult:
     assistant_text: str
@@ -91,6 +114,28 @@ class StructuredGenerationResult:
     raw_content: str
     usage: dict[str, Any]
     error: str = ""
+
+class StructuredChatProposedAction(BaseModel):
+    action_type: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredChatOutput(BaseModel):
+    assistant_text: str = ""
+    proposed_actions: list[StructuredChatProposedAction] = Field(default_factory=list)
+
+
+class StructuredToTBranch(BaseModel):
+    title: str = ""
+    hypothesis: str = ""
+    rationale: str = ""
+    consistency_risk: str = ""
+
+
+class StructuredToTOutput(BaseModel):
+    branches: list[StructuredToTBranch] = Field(default_factory=list)
+    recommended: str | None = None
+    rationale: str = ""
 
 
 @dataclass(frozen=True)
@@ -629,36 +674,49 @@ def _validate_actions(raw_actions: Any) -> list[dict[str, Any]]:
 
 
 def _extract_json_content(text: str) -> dict[str, Any] | None:
-    stripped = (text or "").strip()
-    if not stripped:
+    """Parse a JSON object from model output without regex-based brace extraction.
+
+    Accepts:
+    - raw JSON object string
+    - a fenced JSON block (```json ... ```)
+    Rejects:
+    - prose that merely *contains* a JSON object (no brace scanning)
+    """
+
+    content = str(text or "").strip()
+    if not content:
         return None
 
     try:
-        data = json.loads(stripped)
-        if isinstance(data, dict):
-            return data
+        parsed = json.loads(content)
+        if isinstance(parsed, dict):
+            return parsed
     except Exception:
         pass
 
-    fence = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", stripped, re.IGNORECASE)
-    if fence:
-        block = fence.group(1).strip()
-        try:
-            data = json.loads(block)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-
-    match = re.search(r"\{[\s\S]*\}", stripped)
-    if match:
-        try:
-            data = json.loads(match.group(0))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-    return None
+    # Compat-only: accept a single fenced JSON block. This keeps parsing deterministic
+    # without the safety pitfalls of "find first {...}" extraction.
+    cursor = 0
+    while True:
+        start = content.find("```", cursor)
+        if start < 0:
+            return None
+        header_end = content.find("\n", start + 3)
+        if header_end < 0:
+            header_end = start + 3
+        lang = content[start + 3 : header_end].strip().lower()
+        end = content.find("```", header_end + 1)
+        if end < 0:
+            return None
+        block = content[header_end + 1 : end].strip()
+        if lang in {"", "json"} and block:
+            try:
+                parsed = json.loads(block)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        cursor = end + 3
 
 
 def _strip_reasoning_content(text: str) -> str:
@@ -1065,29 +1123,82 @@ async def _generate_openai_compatible(
             include_cache_prefix=bool(prompt_cache_key),
         )
     )
-    body = {
+    base_body: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": resolved_temperature,
         "stream": False,
-        "response_format": {"type": "json_object"},
         "max_tokens": int(settings.llm_max_output_tokens),
     }
     if not bool(thinking_enabled):
-        body["enable_thinking"] = False
-        body["chat_template_kwargs"] = {"enable_thinking": False}
+        base_body["enable_thinking"] = False
+        base_body["chat_template_kwargs"] = {"enable_thinking": False}
     if prompt_cache_key:
-        body["prompt_cache_key"] = prompt_cache_key
+        base_body["prompt_cache_key"] = prompt_cache_key
 
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout = httpx.Timeout(float(settings.llm_timeout_seconds))
     data: dict[str, Any]
     cache_fallback_disabled = False
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    structured_mode = str(getattr(settings, "llm_structured_mode", "strict") or "strict").strip().lower()
+    schema_name = f"{provider_name}_chat_output"
+    try:
+        chat_schema: dict[str, Any] = StructuredChatOutput.model_json_schema()
+    except Exception as exc:
+        raise ValueError(f"failed_to_build_chat_schema: {exc}") from exc
+
+    def _json_schema_response_format() -> dict[str, Any]:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "schema": chat_schema,
+                "strict": True,
+            },
+        }
+
+    def _tool_call_payload() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        tool_def = {
+            "type": "function",
+            "function": {
+                "name": schema_name,
+                "description": "Return a single JSON object that matches the provided schema.",
+                "parameters": chat_schema,
+            },
+        }
+        tool_choice = {"type": "function", "function": {"name": schema_name}}
+        return [tool_def], tool_choice
+
+    # protocol attempts: strict prefers json_schema/tools; compat allows json_object fallback
+    candidate_protocols = ["json_schema", "tool_call"]
+    if structured_mode == "compat":
+        candidate_protocols.append("json_object")
+
+    # Skip known-unsupported protocols to avoid repeated 400/422 spam.
+    json_schema_cap = _structured_caps_get(cache_state_key, "json_schema")
+    tool_cap = _structured_caps_get(cache_state_key, "tool_call")
+    protocols: list[str] = []
+    for item in candidate_protocols:
+        if item == "json_schema" and json_schema_cap is False:
+            continue
+        if item == "tool_call" and tool_cap is False:
+            continue
+        protocols.append(item)
+    if not protocols:
+        raise ValueError(
+            f"structured_outputs_unavailable provider={provider_name} model={model} mode={structured_mode}"
+        )
+
+    chosen_protocol = ""
+    raw_content = ""
+    parsed_obj: StructuredChatOutput | None = None
+
+    async def _post_with_prompt_cache_fallback(body: dict[str, Any]) -> dict[str, Any]:
+        nonlocal cache_fallback_disabled, prompt_cache_key
         try:
             resp = await client.post(endpoint, json=body, headers=headers)
             resp.raise_for_status()
-            data = resp.json()
+            return resp.json()
         except httpx.HTTPStatusError as exc:
             if prompt_cache_key and exc.response is not None and exc.response.status_code in {400, 422}:
                 _cache_state_record_protocol_error(cache_state_key)
@@ -1104,37 +1215,133 @@ async def _generate_openai_compatible(
                 ]
                 retry = await client.post(endpoint, json=fallback_body, headers=headers)
                 retry.raise_for_status()
-                data = retry.json()
                 cache_fallback_disabled = True
                 prompt_cache_key = None
+                return retry.json()
+            raise
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        last_exc: Exception | None = None
+        for protocol in protocols:
+            chosen_protocol = protocol
+            body = dict(base_body)
+            if protocol == "json_schema":
+                body["response_format"] = _json_schema_response_format()
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
+            elif protocol == "tool_call":
+                tools, tool_choice = _tool_call_payload()
+                body["tools"] = tools
+                body["tool_choice"] = tool_choice
+                body.pop("response_format", None)
             else:
+                body["response_format"] = {"type": "json_object"}
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
+
+            try:
+                data = await _post_with_prompt_cache_fallback(body)
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                status_code = exc.response.status_code if exc.response is not None else None
+                if protocol in {"json_schema", "tool_call"} and status_code in {400, 422}:
+                    _structured_caps_set(cache_state_key, protocol, False)
+                    # compat can fall back; strict should surface the error quickly
+                    if structured_mode == "compat":
+                        continue
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if structured_mode == "compat" and protocol in {"json_schema", "tool_call"}:
+                    continue
                 raise
 
-    content_raw = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    content = _strip_reasoning_content(content_raw)
-    parsed = _extract_json_content(content)
-    if not parsed:
-        fallback_text = content or str(content_raw or "")
+            # Extract raw JSON payload according to the chosen protocol.
+            message = data.get("choices", [{}])[0].get("message", {}) if isinstance(data, dict) else {}
+            if protocol == "tool_call":
+                args_text = None
+                tool_calls = message.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    first = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+                    function = first.get("function") if isinstance(first.get("function"), dict) else {}
+                    args_text = function.get("arguments")
+                if args_text is None:
+                    function_call = message.get("function_call") if isinstance(message.get("function_call"), dict) else {}
+                    args_text = function_call.get("arguments")
+                raw_content = str(args_text or "")
+                parsed_dict = None
+                try:
+                    parsed_json = json.loads(raw_content) if raw_content.strip() else None
+                    parsed_dict = parsed_json if isinstance(parsed_json, dict) else None
+                except Exception:
+                    parsed_dict = None
+            else:
+                content_raw = message.get("content", "")
+                raw_content = str(content_raw or "")
+                cleaned = _strip_reasoning_content(raw_content)
+                parsed_dict = _extract_json_content(cleaned)
+
+            if not isinstance(parsed_dict, dict):
+                # In compat mode, allow falling back from "fancier" protocols.
+                if structured_mode == "compat" and protocol in {"json_schema", "tool_call"}:
+                    continue
+                if structured_mode == "strict":
+                    raise ValueError(f"structured_output_parse_failed protocol={protocol}")
+                parsed_obj = None
+                break
+
+            try:
+                parsed_obj = StructuredChatOutput.model_validate(parsed_dict)
+            except ValidationError as exc:
+                last_exc = exc
+                if structured_mode == "compat" and protocol in {"json_schema", "tool_call"}:
+                    continue
+                if structured_mode == "strict":
+                    raise ValueError(f"structured_output_validation_failed protocol={protocol}") from exc
+                parsed_obj = None
+                break
+
+            # Success: record protocol support.
+            if protocol == "json_schema":
+                _structured_caps_set(cache_state_key, "json_schema", True)
+            if protocol == "tool_call":
+                _structured_caps_set(cache_state_key, "tool_call", True)
+            break
+        else:
+            # No protocol succeeded.
+            if last_exc is not None:
+                raise last_exc
+            raise ValueError("structured_output_generation_failed")
+
+    if not parsed_obj:
+        fallback_text = _strip_reasoning_content(raw_content) if raw_content else ""
         return ChatGenerationResult(
             assistant_text=fallback_text or "模型返回为空",
             proposed_actions=[],
             usage={
                 "provider": provider_name,
                 "model": model,
+                "structured_mode": structured_mode,
+                "structured_protocol": chosen_protocol,
                 "raw_response_format": "non_json",
             },
         )
 
-    assistant_text = str(parsed.get("assistant_text", "")).strip() or "好的，我已处理你的请求。"
+    assistant_text = (parsed_obj.assistant_text or "").strip() or "好的，我已处理你的请求。"
     assistant_text = _strip_reasoning_content(assistant_text)
-    actions = _validate_actions(parsed.get("proposed_actions", []))
+    raw_actions: list[dict[str, Any]] = [
+        {"action_type": item.action_type, "payload": item.payload}
+        for item in (parsed_obj.proposed_actions or [])
+        if isinstance(item, StructuredChatProposedAction)
+    ]
+    actions = _validate_actions(raw_actions)
     usage_raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-    prompt_details = usage_raw.get("prompt_tokens_details") if isinstance(usage_raw.get("prompt_tokens_details"), dict) else {}
-    cache_read_tokens = (
-        prompt_details.get("cached_tokens")
-        if isinstance(prompt_details, dict)
-        else None
+    prompt_details = (
+        usage_raw.get("prompt_tokens_details")
+        if isinstance(usage_raw.get("prompt_tokens_details"), dict)
+        else {}
     )
+    cache_read_tokens = prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
     usage = {
         "provider": provider_name,
         "model": model,
@@ -1142,6 +1349,8 @@ async def _generate_openai_compatible(
         "temperature_profile": normalized_temperature_profile,
         "temperature_source": temperature_source,
         "thinking_enabled": bool(thinking_enabled),
+        "structured_mode": structured_mode,
+        "structured_protocol": chosen_protocol,
         "prompt_tokens": usage_raw.get("prompt_tokens"),
         "completion_tokens": usage_raw.get("completion_tokens"),
         "total_tokens": usage_raw.get("total_tokens"),
@@ -1555,18 +1764,6 @@ async def generate_tot_brainstorm(
     if not openai_like:
         return _heuristic_tot(user_input)
 
-    if provider == "deepseek":
-        api_key = str((runtime.api_key if runtime else None) or settings.deepseek_api_key or settings.llm_api_key or "").strip()
-        base_url = str((runtime.base_url if runtime else None) or settings.deepseek_base_url or settings.llm_base_url or "").strip()
-        model = model_override or (runtime.model if runtime else None) or settings.deepseek_model or settings.llm_model
-    else:
-        api_key = str((runtime.api_key if runtime else None) or settings.llm_api_key or "").strip()
-        base_url = str((runtime.base_url if runtime else None) or settings.llm_base_url or "").strip()
-        model = model_override or (runtime.model if runtime else None) or settings.llm_model
-    if not api_key or not base_url:
-        return _heuristic_tot(user_input)
-
-    endpoint = base_url.rstrip("/") + "/chat/completions"
     compact_context = _compact_context(context)
     prompt_body = {
         "task": "生成剧情分支并给出一致性评估，供创作者选择。",
@@ -1587,55 +1784,45 @@ async def generate_tot_brainstorm(
             "rationale": "string",
         },
     }
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "你是小说 ToT 推演器。"
-                    "请给出 2~3 个互斥剧情分支，并做一致性风险评估。"
-                    "严禁编造未提供的硬事实。仅输出 JSON。"
-                ),
-            },
-            {"role": "user", "content": json.dumps(prompt_body, ensure_ascii=False)},
-        ],
-        "temperature": 0.2,
-        "stream": False,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
-    timeout = httpx.Timeout(float(settings.tot_timeout_seconds))
+
+    system_prompt = (
+        "你是小说 ToT 推演器。"
+        "请给出 2~3 个互斥剧情分支，并做一致性风险评估。"
+        "严禁编造未提供的硬事实。严格输出符合 schema 的 JSON。"
+    )
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(endpoint, json=body, headers=headers)
-            response.raise_for_status()
-            payload = response.json()
+        structured = await asyncio.to_thread(
+            generate_structured_sync,
+            json.dumps(prompt_body, ensure_ascii=False),
+            output_model=StructuredToTOutput,
+            schema_name="tot_brainstorm_output",
+            context={"system": system_prompt, "raw_prompt": True},
+            model_override=model_override,
+            temperature_override=0.2,
+            timeout_seconds_override=float(settings.tot_timeout_seconds),
+            runtime_config=runtime_config,
+        )
     except Exception:
         return _heuristic_tot(user_input)
 
-    content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
-    parsed = _extract_json_content(content)
-    if not parsed:
+    parsed_model = structured.parsed
+    if not parsed_model:
         return _heuristic_tot(user_input)
 
+    parsed = parsed_model.model_dump() if isinstance(parsed_model, BaseModel) else {}
     branches = _normalize_tot_branches(parsed.get("branches"))
     if not branches:
         return _heuristic_tot(user_input)
     recommended = str(parsed.get("recommended") or "").strip() or branches[0]["id"]
     rationale = _truncate_text(str(parsed.get("rationale") or ""), 200)
-    usage_raw = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    usage = dict(structured.usage or {})
+    if structured.error:
+        usage["structured_error"] = structured.error
     return ToTGenerationResult(
         branches=branches,
         recommended=recommended,
         rationale=rationale,
-        usage={
-            "provider": provider,
-            "model": model,
-            "prompt_tokens": usage_raw.get("prompt_tokens"),
-            "completion_tokens": usage_raw.get("completion_tokens"),
-            "total_tokens": usage_raw.get("total_tokens"),
-        },
+        usage=usage,
     )
 
 
@@ -1719,6 +1906,7 @@ def generate_structured_sync(
     context: dict[str, Any] | None = None,
     model_override: str | None = None,
     temperature_override: float | None = None,
+    timeout_seconds_override: float | None = None,
     runtime_config: dict[str, Any] | ModelRuntimeConfig | None = None,
 ) -> StructuredGenerationResult:
     runtime = _normalize_runtime_config(runtime_config)
@@ -1731,9 +1919,23 @@ def generate_structured_sync(
         raise ValueError(f"provider={provider} is not supported for structured sync generation")
 
     if provider == "deepseek":
-        api_key = str((runtime.api_key if runtime else None) or settings.deepseek_api_key or settings.llm_api_key or "").strip()
-        base_url = str((runtime.base_url if runtime else None) or settings.deepseek_base_url or settings.llm_base_url).rstrip("/")
-        model = model_override or (runtime.model if runtime else None) or settings.deepseek_model or settings.llm_model
+        api_key = str(
+            (runtime.api_key if runtime else None)
+            or settings.deepseek_api_key
+            or settings.llm_api_key
+            or ""
+        ).strip()
+        base_url = str(
+            (runtime.base_url if runtime else None)
+            or settings.deepseek_base_url
+            or settings.llm_base_url
+        ).rstrip("/")
+        model = (
+            model_override
+            or (runtime.model if runtime else None)
+            or settings.deepseek_model
+            or settings.llm_model
+        )
     else:
         api_key = str((runtime.api_key if runtime else None) or settings.llm_api_key or "").strip()
         base_url = str((runtime.base_url if runtime else None) or settings.llm_base_url).rstrip("/")
@@ -1743,14 +1945,19 @@ def generate_structured_sync(
         raise ValueError(f"API key is required for provider={provider}")
 
     endpoint = base_url + "/chat/completions"
+    cache_state_key = _cache_state_key(provider, endpoint, str(model or ""))
+    structured_mode = (
+        str(getattr(settings, "llm_structured_mode", "strict") or "strict").strip().lower()
+    )
+
     raw_prompt = False
-    system_prompt = ""
+    base_system_prompt = ""
     if isinstance(context, dict):
         raw_prompt = bool(context.get("raw_prompt"))
-        system_prompt = str(context.get("system", "") or "").strip()
-    if not system_prompt:
-        system_prompt = (
-            "你是一个结构化输出器。请严格输出符合给定 JSON Schema 的 JSON 对象，"
+        base_system_prompt = str(context.get("system", "") or "").strip()
+    if not base_system_prompt:
+        base_system_prompt = (
+            "你是一个结构化输出器。请严格输出符合给定 schema 的 JSON 对象，"
             "不要 Markdown，不要代码块，不要额外文本。"
         )
 
@@ -1760,8 +1967,6 @@ def generate_structured_sync(
         raise ValueError(f"output_model must be a Pydantic BaseModel: {exc}") from exc
 
     schema_title = str(schema_name or "").strip() or "structured_output"
-    system_prompt = system_prompt + "\n\n【Schema】\n" + f"schema_name={schema_title}\n" + _stable_json_dumps(schema)
-
     if raw_prompt:
         user_text = str(user_input or "").strip()
     else:
@@ -1773,62 +1978,194 @@ def generate_structured_sync(
         else _clamp_temperature(settings.llm_temperature_action)
     )
 
-    body = {
+    base_body: dict[str, Any] = {
         "model": model,
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": base_system_prompt},
             {"role": "user", "content": user_text},
         ],
         "temperature": temperature,
         "stream": False,
-        "response_format": {"type": "json_object"},
         "max_tokens": int(settings.llm_max_output_tokens),
     }
-    body["enable_thinking"] = False
-    body["chat_template_kwargs"] = {"enable_thinking": False}
+    base_body["enable_thinking"] = False
+    base_body["chat_template_kwargs"] = {"enable_thinking": False}
 
-    headers = {"Authorization": f"Bearer {api_key}"}
-    timeout = httpx.Timeout(float(settings.llm_timeout_seconds))
+    def _json_schema_response_format() -> dict[str, Any]:
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_title,
+                "schema": schema,
+                "strict": True,
+            },
+        }
+
+    def _tool_call_payload() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        tool_def = {
+            "type": "function",
+            "function": {
+                "name": schema_title,
+                "description": "Return a single JSON object that matches the provided schema.",
+                "parameters": schema,
+            },
+        }
+        tool_choice = {"type": "function", "function": {"name": schema_title}}
+        return [tool_def], tool_choice
+
+    candidate_protocols = ["json_schema", "tool_call"]
+    if structured_mode == "compat":
+        candidate_protocols.append("json_object")
+
+    json_schema_cap = _structured_caps_get(cache_state_key, "json_schema")
+    tool_cap = _structured_caps_get(cache_state_key, "tool_call")
+    protocols: list[str] = []
+    for item in candidate_protocols:
+        if item == "json_schema" and json_schema_cap is False:
+            continue
+        if item == "tool_call" and tool_cap is False:
+            continue
+        protocols.append(item)
+    if not protocols:
+        raise ValueError(
+            f"structured_outputs_unavailable provider={provider} model={model} mode={structured_mode}"
+        )
 
     raw_content = ""
+    chosen_protocol = ""
+    parsed: BaseModel | None = None
+    last_exc: Exception | None = None
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout_seconds = float(settings.llm_timeout_seconds)
+    if isinstance(timeout_seconds_override, (int, float)) and float(timeout_seconds_override) > 0:
+        timeout_seconds = float(timeout_seconds_override)
+    timeout = httpx.Timeout(timeout_seconds)
+
     usage: dict[str, Any] = {
         "provider": provider,
         "model": model,
         "temperature": temperature,
+        "structured_mode": structured_mode,
     }
+
     with httpx.Client(timeout=timeout) as client:
-        resp = client.post(endpoint, json=body, headers=headers)
-        resp.raise_for_status()
-        payload = resp.json()
-        usage_raw = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-        usage.update(
-            {
-                "prompt_tokens": usage_raw.get("prompt_tokens"),
-                "completion_tokens": usage_raw.get("completion_tokens"),
-                "total_tokens": usage_raw.get("total_tokens"),
-            }
-        )
-        raw_content = str(payload.get("choices", [{}])[0].get("message", {}).get("content", "") or "")
+        for protocol in protocols:
+            chosen_protocol = protocol
+            body = dict(base_body)
+            if protocol == "json_schema":
+                body["response_format"] = _json_schema_response_format()
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
+            elif protocol == "tool_call":
+                tools, tool_choice = _tool_call_payload()
+                body["tools"] = tools
+                body["tool_choice"] = tool_choice
+                body.pop("response_format", None)
+            else:
+                schema_prompt = (
+                    base_system_prompt
+                    + "\n\n【Schema】\n"
+                    + f"schema_name={schema_title}\n"
+                    + _stable_json_dumps(schema)
+                )
+                body["messages"] = [
+                    {"role": "system", "content": schema_prompt},
+                    {"role": "user", "content": user_text},
+                ]
+                body["response_format"] = {"type": "json_object"}
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
 
-    cleaned = _strip_reasoning_content(raw_content)
-    parsed_dict = _extract_json_content(cleaned)
-    if not parsed_dict:
-        return StructuredGenerationResult(
-            parsed=None,
-            raw_content=raw_content,
-            usage={**usage, "raw_response_format": "non_json"},
-            error="invalid_json",
-        )
+            try:
+                resp = client.post(endpoint, json=body, headers=headers)
+                resp.raise_for_status()
+                payload = resp.json()
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                status_code = exc.response.status_code if exc.response is not None else None
+                if protocol in {"json_schema", "tool_call"} and status_code in {400, 422}:
+                    _structured_caps_set(cache_state_key, protocol, False)
+                    if structured_mode == "compat":
+                        continue
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if structured_mode == "compat" and protocol in {"json_schema", "tool_call"}:
+                    continue
+                raise
 
-    try:
-        parsed = output_model.model_validate(parsed_dict)
-    except ValidationError as exc:
-        code = exc.errors()[0].get("type") if exc.errors() else "unknown"
-        return StructuredGenerationResult(
-            parsed=None,
-            raw_content=raw_content,
-            usage=usage,
-            error=f"validation_error:{code}",
-        )
+            usage_raw = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            usage.update(
+                {
+                    "prompt_tokens": usage_raw.get("prompt_tokens"),
+                    "completion_tokens": usage_raw.get("completion_tokens"),
+                    "total_tokens": usage_raw.get("total_tokens"),
+                    "structured_protocol": chosen_protocol,
+                }
+            )
+
+            message = (
+                payload.get("choices", [{}])[0].get("message", {})
+                if isinstance(payload, dict)
+                else {}
+            )
+            parsed_dict: dict[str, Any] | None = None
+            if protocol == "tool_call":
+                args_text = None
+                tool_calls = message.get("tool_calls")
+                if isinstance(tool_calls, list) and tool_calls:
+                    first = tool_calls[0] if isinstance(tool_calls[0], dict) else {}
+                    function = first.get("function") if isinstance(first.get("function"), dict) else {}
+                    args_text = function.get("arguments")
+                if args_text is None:
+                    function_call = message.get("function_call") if isinstance(message.get("function_call"), dict) else {}
+                    args_text = function_call.get("arguments")
+                raw_content = str(args_text or "")
+                try:
+                    parsed_json = json.loads(raw_content) if raw_content.strip() else None
+                    parsed_dict = parsed_json if isinstance(parsed_json, dict) else None
+                except Exception:
+                    parsed_dict = None
+            else:
+                content_raw = message.get("content", "")
+                raw_content = str(content_raw or "")
+                cleaned = _strip_reasoning_content(raw_content)
+                extracted = _extract_json_content(cleaned)
+                parsed_dict = extracted if isinstance(extracted, dict) else None
+
+            if not isinstance(parsed_dict, dict):
+                if structured_mode == "compat" and protocol in {"json_schema", "tool_call"}:
+                    continue
+                return StructuredGenerationResult(
+                    parsed=None,
+                    raw_content=raw_content,
+                    usage={**usage, "raw_response_format": "non_json"},
+                    error="invalid_json",
+                )
+
+            try:
+                parsed = output_model.model_validate(parsed_dict)
+            except ValidationError as exc:
+                last_exc = exc
+                if structured_mode == "compat" and protocol in {"json_schema", "tool_call"}:
+                    continue
+                code = exc.errors()[0].get("type") if exc.errors() else "unknown"
+                return StructuredGenerationResult(
+                    parsed=None,
+                    raw_content=raw_content,
+                    usage=usage,
+                    error=f"validation_error:{code}",
+                )
+
+            if protocol == "json_schema":
+                _structured_caps_set(cache_state_key, "json_schema", True)
+            if protocol == "tool_call":
+                _structured_caps_set(cache_state_key, "tool_call", True)
+            break
+        else:
+            if last_exc is not None:
+                raise last_exc
+            raise ValueError("structured_output_generation_failed")
 
     return StructuredGenerationResult(parsed=parsed, raw_content=raw_content, usage=usage)

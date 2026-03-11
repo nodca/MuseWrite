@@ -33,7 +33,15 @@ Docker compose 下这是 build-time 变量（会注入静态资源构建），�
 - Session management (switch / rename / delete)
 - Writing workspace (chapter editor + scene beat context)
 - Assistant action loop (`应用并记录 / 拒绝 / 撤销`) with logs
+- Tiptap semantic diff layer for polish/expand suggestions (`接受 / 忽略` per change, Git-style inline rendering)
+- Ghost Text streaming autocomplete over WebSocket (`Tab` accept all, `Ctrl+ArrowRight` accept one word)
 - Context X-Ray (hover/focus assistant replies to inspect per-message `evidence` and project fallback snippets)
 - Prompt & knowledge panel (templates + settings/cards injection)
 
 More product-level usage details: `docs/author-manual.md`
+
+## Notes
+
+- `VITE_API_TOKEN` is reused for both HTTP requests and Ghost Text WebSocket auth.
+- Because browsers cannot set custom headers for WebSocket handshakes, the frontend sends that token as `?token=` when opening `/api/chat/ghost-text`.
+- If your backend uses an `openai_compatible` provider that does not support `json_schema` or tool calling, set `LLM_STRUCTURED_MODE=compat` on the API side. The default remains `strict`.

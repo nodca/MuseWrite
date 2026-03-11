@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import type { ChatStreamTimingMetrics } from "../api/chatApi";
 import {
   DebugSnapshotGrid,
@@ -65,6 +65,7 @@ const WorkspaceStatusBar = memo(function WorkspaceStatusBar({
 });
 
 export type WorkbenchPanelVisibility = {
+  actions: boolean;
   prompt: boolean;
   planning: boolean;
   snapshot: boolean;
@@ -73,6 +74,7 @@ export type WorkbenchPanelVisibility = {
 type WorkbenchPanelKey = keyof WorkbenchPanelVisibility;
 
 const WORKBENCH_PANEL_LABELS: Record<WorkbenchPanelKey, string> = {
+  actions: "动作提议 + 图谱",
   prompt: "Prompt + 知识库",
   planning: "结构化大纲",
   snapshot: "检索快照",
@@ -84,7 +86,7 @@ type WorkbenchPanelBarProps = {
 };
 
 const WorkbenchPanelBar = memo(function WorkbenchPanelBar({ visibility, onToggle }: WorkbenchPanelBarProps) {
-  const allHidden = !visibility.prompt && !visibility.planning && !visibility.snapshot;
+  const allHidden = !visibility.actions && !visibility.prompt && !visibility.planning && !visibility.snapshot;
   return (
     <section className="panel workbench-panel-bar">
       <div className="panel-title sub">
@@ -108,6 +110,7 @@ export type ProWorkspaceModeProps = {
   statusBar: WorkspaceStatusBarProps;
   workbenchPanelVisibility: WorkbenchPanelVisibility;
   onToggleWorkbenchPanel: (panelKey: WorkbenchPanelKey) => void;
+  actionsPanelNode: ReactNode;
   promptPanelReady: boolean;
   promptPanelProps: PromptWorkshopPanelProps;
   planningPanelProps: StoryPlanningPanelProps;
@@ -119,6 +122,7 @@ export const ProWorkspaceMode = memo(function ProWorkspaceMode({
   statusBar,
   workbenchPanelVisibility,
   onToggleWorkbenchPanel,
+  actionsPanelNode,
   promptPanelReady,
   promptPanelProps,
   planningPanelProps,
@@ -130,6 +134,8 @@ export const ProWorkspaceMode = memo(function ProWorkspaceMode({
       <WorkspaceStatusBar {...statusBar} />
 
       <WorkbenchPanelBar visibility={workbenchPanelVisibility} onToggle={onToggleWorkbenchPanel} />
+
+      {workbenchPanelVisibility.actions ? actionsPanelNode : null}
 
       {workbenchPanelVisibility.prompt && promptPanelReady ? <PromptWorkshopPanel {...promptPanelProps} /> : null}
 

@@ -23,6 +23,13 @@ def _parse_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _normalize_structured_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {"strict", "compat"}:
+        return mode
+    return "strict"
+
+
 def _stringify_env_default(value: object) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -181,6 +188,7 @@ class Settings:
     llm_api_key = os.getenv("LLM_API_KEY", "")
     llm_timeout_seconds = int(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
     llm_max_output_tokens = max(int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "1800")), 128)
+    llm_structured_mode = _normalize_structured_mode(os.getenv("LLM_STRUCTURED_MODE"))
     llm_temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     llm_temperature_chat = _parse_float(os.getenv("LLM_TEMPERATURE_CHAT"), llm_temperature)
     llm_temperature_action = _parse_float(os.getenv("LLM_TEMPERATURE_ACTION"), 0.0)

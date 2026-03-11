@@ -21,6 +21,7 @@ class CoreSettings:
         "llm_api_key",
         "llm_timeout_seconds",
         "llm_max_output_tokens",
+        "llm_structured_mode",
         "llm_temperature",
         "llm_temperature_chat",
         "llm_temperature_action",
