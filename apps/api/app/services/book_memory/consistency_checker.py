@@ -300,7 +300,7 @@ def _extract_keywords(text: str, min_len: int = 2, max_count: int = 5) -> list[s
             continue
         # If this is a long CJK string (no spaces), extract sub-phrases.
         if len(t) > 4 and any("\u4e00" <= c <= "\u9fff" for c in t):
-            for size in (4, 3, 2):
+            for size in (2, 3, 4):
                 for i in range(len(t) - size + 1):
                     sub = t[i : i + size]
                     if sub not in keywords:
