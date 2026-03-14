@@ -158,6 +158,20 @@ services:
       PROXY_TIMEOUT: ${LIGHTRAG_EMBEDDING_TIMEOUT:-30}
     restart: unless-stopped
 
+  llm-proxy:
+    build:
+      context: ./docker/llm-proxy
+      dockerfile: Dockerfile
+    container_name: novel_llm_proxy
+    environment:
+      LLM_UPSTREAM_URL: ${LLM_BASE_URL:-https://www.foxnio.com/v1}
+      LLM_UPSTREAM_KEY: ${LLM_API_KEY:-}
+      DEFAULT_MODEL: ${LLM_MODEL:-gpt-5.2}
+      PROXY_TIMEOUT: ${LLM_PROXY_TIMEOUT:-120}
+    ports:
+      - "${LLM_PROXY_PORT:-8081}:8081"
+    restart: unless-stopped
+
   lightrag:
     image: ${LIGHTRAG_IMAGE:-ghcr.io/hkuds/lightrag:latest}
     container_name: novel_lightrag
