@@ -250,11 +250,19 @@ class Settings:
     langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "")
     langfuse_secret_key = os.getenv("LANGFUSE_SECRET_KEY", "")
 
+    # ── Unified Embedding config ──
+    # Falls back to LLM provider if not explicitly set.
+    embedding_base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("LLM_API_KEY", "")
+    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
+
     lightrag_enabled = _parse_bool(os.getenv("LIGHTRAG_ENABLED"), True)
     lightrag_base_url = os.getenv("LIGHTRAG_BASE_URL", "")
-    lightrag_llm_model = os.getenv("LIGHTRAG_LLM_MODEL", "")
-    lightrag_llm_base_url = os.getenv("LIGHTRAG_LLM_BASE_URL", "")
-    lightrag_llm_api_key = os.getenv("LIGHTRAG_LLM_API_KEY", "")
+    # LightRAG LLM: falls back to main LLM config if not explicitly set.
+    lightrag_llm_model = os.getenv("LIGHTRAG_LLM_MODEL") or os.getenv("LLM_MODEL", "")
+    lightrag_llm_base_url = os.getenv("LIGHTRAG_LLM_BASE_URL") or os.getenv("LLM_BASE_URL", "")
+    lightrag_llm_api_key = os.getenv("LIGHTRAG_LLM_API_KEY") or os.getenv("LLM_API_KEY", "")
     lightrag_query_mode = os.getenv("LIGHTRAG_QUERY_MODE", "mix")
     lightrag_graph_query_mode = os.getenv("LIGHTRAG_GRAPH_QUERY_MODE", "global")
     lightrag_graph_from_query_enabled = _parse_bool(
@@ -390,19 +398,11 @@ class Settings:
     memory_decay_floor = _parse_float(os.getenv("MEMORY_DECAY_FLOOR"), 0.25)
     # ── Graphiti temporal graph ──
     graphiti_enabled = _parse_bool(os.getenv("GRAPHITI_ENABLED"), False)
-    graphiti_embedding_base_url = os.getenv(
-        "GRAPHITI_EMBEDDING_BASE_URL",
-        os.getenv("LIGHTRAG_EMBEDDING_BASE_URL", "https://router.tumuer.me/v1"),
-    )
-    graphiti_embedding_api_key = os.getenv(
-        "GRAPHITI_EMBEDDING_API_KEY",
-        os.getenv("LIGHTRAG_EMBEDDING_API_KEY", ""),
-    )
-    graphiti_embedding_model = os.getenv(
-        "GRAPHITI_EMBEDDING_MODEL",
-        os.getenv("LIGHTRAG_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B"),
-    )
-    graphiti_embedding_dim = int(os.getenv("GRAPHITI_EMBEDDING_DIM", os.getenv("LIGHTRAG_EMBEDDING_DIM", "4096")))
+    # Graphiti embedding: falls back to unified EMBEDDING_* config.
+    graphiti_embedding_base_url = os.getenv("GRAPHITI_EMBEDDING_BASE_URL") or embedding_base_url
+    graphiti_embedding_api_key = os.getenv("GRAPHITI_EMBEDDING_API_KEY") or embedding_api_key
+    graphiti_embedding_model = os.getenv("GRAPHITI_EMBEDDING_MODEL") or embedding_model
+    graphiti_embedding_dim = int(os.getenv("GRAPHITI_EMBEDDING_DIM", str(embedding_dim)))
     use_memory_pipeline = _parse_bool(os.getenv("USE_MEMORY_PIPELINE"), True)
 
     memory_consolidation_enabled = _parse_bool(os.getenv("MEMORY_CONSOLIDATION_ENABLED"), True)

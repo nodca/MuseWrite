@@ -1,19 +1,11 @@
 FROM python:3.12-slim AS base
 
-# Install uv from official image.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_SYSTEM_PYTHON=1 \
-    UV_COMPILE_BYTECODE=1 \
-    CONTEXT_COMPRESSION_MODE=rerank \
-    CONTEXT_COMPRESSION_RERANKER_ENABLED=true \
-    CONTEXT_COMPRESSION_RERANKER_MODEL=BAAI/bge-reranker-v2-minicpm-layerwise \
-    CONTEXT_COMPRESSION_RERANKER_RUNTIME=onnx \
-    CONTEXT_COMPRESSION_RERANKER_TRUST_REMOTE_CODE=true \
-    CONTEXT_COMPRESSION_RERANKER_ONNX_PATH=/app/models/bge-reranker-v2-minicpm-layerwise-int8-onnx/model.onnx \
-    CONTEXT_COMPRESSION_RERANKER_ONNX_PROVIDER=CPUExecutionProvider
+    UV_COMPILE_BYTECODE=1
 
 WORKDIR /app
 
@@ -21,9 +13,6 @@ COPY apps/api/requirements-docker.txt ./requirements.txt
 RUN uv pip install --no-cache -r requirements.txt
 
 COPY apps/api/app ./app
-COPY apps/api/models ./models
-COPY apps/api/scripts ./scripts
-RUN rm -rf /root/.cache/huggingface
 
 EXPOSE 8000
 
