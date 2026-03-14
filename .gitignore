@@ -42,3 +42,4 @@ apps/api/evals/out/
 .claude/worktrees/
 .worktrees/
 .tmp-trace*
+*.db
