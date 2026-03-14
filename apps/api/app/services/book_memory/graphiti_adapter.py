@@ -93,39 +93,48 @@ def _build_graphiti():
     """Construct and initialise a Graphiti instance."""
     # Late imports so the module loads even when graphiti-core is absent.
     from graphiti_core import Graphiti
+    from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
     from graphiti_core.driver.neo4j_driver import Neo4jDriver
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
     from graphiti_core.llm_client.config import LLMConfig
     from graphiti_core.llm_client.openai_client import OpenAIClient
 
+    llm_api_key = settings.lightrag_llm_api_key or settings.llm_api_key
+    llm_base_url = settings.lightrag_llm_base_url or settings.llm_base_url
+    llm_model = settings.lightrag_llm_model or settings.llm_model
+
     llm_config = LLMConfig(
-        api_key=settings.lightrag_llm_api_key,
-        base_url=settings.lightrag_llm_base_url,
-        model=settings.lightrag_llm_model or "DeepSeek-V3",
-        small_model=settings.lightrag_llm_model or "DeepSeek-V3",
+        api_key=llm_api_key,
+        base_url=llm_base_url,
+        model=llm_model,
+        small_model=llm_model,
         temperature=0.0,
     )
-    llm_client = OpenAIClient(config=llm_config)
+    llm_client = OpenAIClient(config=llm_config, reasoning="medium")
 
     embedder_config = OpenAIEmbedderConfig(
         api_key=settings.graphiti_embedding_api_key,
         base_url=settings.graphiti_embedding_base_url,
-        embedding_model=settings.graphiti_embedding_model or "Qwen/Qwen3-Embedding-8B",
-        embedding_dim=settings.graphiti_embedding_dim or 4096,
+        embedding_model=settings.graphiti_embedding_model,
+        embedding_dim=settings.graphiti_embedding_dim,
     )
     embedder = OpenAIEmbedder(config=embedder_config)
+
+    # Cross-encoder: reuse LLM config (Graphiti uses it for reranking).
+    cross_encoder = OpenAIRerankerClient(config=llm_config)
 
     driver = Neo4jDriver(
         uri=settings.neo4j_uri,
         user=settings.neo4j_username,
         password=settings.neo4j_password,
-        database=settings.neo4j_database or "neo4j",
+        database=settings.neo4j_database,
     )
 
     graphiti = Graphiti(
         graph_driver=driver,
         llm_client=llm_client,
         embedder=embedder,
+        cross_encoder=cross_encoder,
         store_raw_episode_content=True,
     )
 
@@ -246,14 +255,11 @@ def search_temporal_facts(
     gid = _group_id(project_id)
 
     try:
-        from graphiti_core.search.search_filters import SearchFilters
-
         results = _run_async(
             graphiti.search(
                 query=query,
                 group_ids=[gid],
                 num_results=limit,
-                search_filters=SearchFilters(),
             )
         )
     except Exception as exc:

@@ -241,10 +241,12 @@ class Settings:
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     gemini_cache_enabled = _parse_bool(os.getenv("GEMINI_CACHE_ENABLED"), True)
     gemini_cache_ttl_seconds = max(int(os.getenv("GEMINI_CACHE_TTL_SECONDS", "3600")), 60)
+    # DEEPSEEK_* removed — use LLM_* with LLM_BASE_URL=https://api.deepseek.com/v1
+    # Kept as aliases for backward compatibility (resolve to LLM_* values).
     deepseek_enabled = _parse_bool(os.getenv("DEEPSEEK_ENABLED"), False)
-    deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
-    deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("LLM_BASE_URL", "")
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("LLM_API_KEY", "")
+    deepseek_model = os.getenv("DEEPSEEK_MODEL") or os.getenv("LLM_MODEL", "")
     langfuse_enabled = _parse_bool(os.getenv("LANGFUSE_ENABLED"), False)
     langfuse_host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
     langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "")
@@ -252,9 +254,9 @@ class Settings:
 
     # ── Unified Embedding config ──
     # Falls back to LLM provider if not explicitly set.
-    embedding_base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+    embedding_base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL", "")
     embedding_api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("LLM_API_KEY", "")
-    embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_model = os.getenv("EMBEDDING_MODEL", "")
     embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 
     lightrag_enabled = _parse_bool(os.getenv("LIGHTRAG_ENABLED"), True)
@@ -410,7 +412,7 @@ class Settings:
     memory_consolidation_preview_chars = max(int(os.getenv("MEMORY_CONSOLIDATION_PREVIEW_CHARS", "1200")), 200)
     memory_consolidation_llm_timeout_seconds = _parse_float(
         os.getenv("MEMORY_CONSOLIDATION_LLM_TIMEOUT_SECONDS"),
-        8.0,
+        60.0,
     )
     memory_semantic_key_prefix = os.getenv("MEMORY_SEMANTIC_KEY_PREFIX", "memory.semantic.volume.")
     tot_enabled = _parse_bool(os.getenv("TOT_ENABLED"), True)
