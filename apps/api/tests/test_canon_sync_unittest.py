@@ -63,6 +63,17 @@ CHARACTER_TEXT_2 = """\
 她对林澈有一种说不清的信任。
 """
 
+# Pure prose — no labels at all.
+CHARACTER_PROSE_ONLY = """\
+# 张无忌
+
+张无忌是明教教主，性格优柔寡断，为人善良。
+他一心想要化解正邪之争，立志让江湖恢复太平。
+表面上温和随性，实则内心深处害怕辜负身边的人。
+他绝不会背叛自己的朋友，也从不主动伤害弱者。
+说话时总是温和地斟酌用词。
+"""
+
 
 class TestParseWorldRules(unittest.TestCase):
     def test_parses_three_rules(self) -> None:
@@ -86,46 +97,97 @@ class TestParseWorldRules(unittest.TestCase):
 
 class TestParseCharacter(unittest.TestCase):
     def test_extracts_name(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertEqual(data["canonical_name"], "林澈")
 
     def test_extracts_aliases(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertIn("小澈", data["aliases"])
         self.assertIn("林师弟", data["aliases"])
 
     def test_extracts_goals(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertIn("为师父复仇", data["core_goals"])
         self.assertIn("飞升", data["core_goals"])
 
     def test_extracts_traits(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertIn("冷静", data["public_traits"])
         self.assertIn("坚毅", data["public_traits"])
 
     def test_extracts_taboos(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertIn("不伤无辜", data["taboos"])
 
     def test_extracts_fears(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertIn("失去同伴", data["fears"])
 
     def test_extracts_voice(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertEqual(data["default_voice_notes"], "冷淡")
 
     def test_extracts_description(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_1)
+        data = parse_character_text(CHARACTER_TEXT_1, use_llm=False)
         self.assertIn("天剑宗外门弟子", data["description"])
         self.assertIn("复仇之路", data["description"])
 
     def test_second_character(self) -> None:
-        data = parse_character_text(CHARACTER_TEXT_2)
+        data = parse_character_text(CHARACTER_TEXT_2, use_llm=False)
         self.assertEqual(data["canonical_name"], "苏青")
         self.assertIn("苏师姐", data["aliases"])
         self.assertIn("守护师门", data["core_goals"])
+
+
+class TestProseOnlyExtraction(unittest.TestCase):
+    """Test regex extraction from pure prose (no labels, no LLM)."""
+
+    def test_extracts_name_from_heading(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        self.assertEqual(data["canonical_name"], "张无忌")
+
+    def test_extracts_traits_from_prose(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        trait_text = " ".join(data["public_traits"])
+        self.assertTrue(
+            any(t in trait_text for t in ["优柔寡断", "善良"]),
+            f"Should extract traits from '性格优柔寡断'. Got: {data['public_traits']}",
+        )
+
+    def test_extracts_goals_from_prose(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        goal_text = " ".join(data["core_goals"])
+        self.assertTrue(
+            "化解正邪之争" in goal_text or "太平" in goal_text or "复仇" in goal_text
+            or len(data["core_goals"]) > 0,
+            f"Should extract goals from prose. Got: {data['core_goals']}",
+        )
+
+    def test_extracts_private_traits_from_prose(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        private_text = " ".join(data["private_traits"])
+        self.assertTrue(
+            len(data["private_traits"]) > 0,
+            f"Should extract private traits from '实则内心深处...'. Got: {data['private_traits']}",
+        )
+
+    def test_extracts_fears_from_prose(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        self.assertTrue(
+            len(data["fears"]) > 0,
+            f"Should extract fears from '害怕辜负'. Got: {data['fears']}",
+        )
+
+    def test_extracts_taboos_from_prose(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        self.assertTrue(
+            len(data["taboos"]) > 0,
+            f"Should extract taboos from '绝不会背叛'. Got: {data['taboos']}",
+        )
+
+    def test_has_description(self) -> None:
+        data = parse_character_text(CHARACTER_PROSE_ONLY, use_llm=False)
+        self.assertIn("明教教主", data["description"])
 
 
 class TestSyncDB(unittest.TestCase):
