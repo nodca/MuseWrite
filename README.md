@@ -10,10 +10,10 @@ AI 辅助小说写作平台（Monorepo：`apps/api` + `apps/web`）。
 
 很多写作工具能给灵感，但在长篇里容易出现三类问题：
 - 前后设定冲突
-- 对话越写越慢
+- 写着写着不知道下一章、下一场该怎么推进
 - AI 改动不可控，难以回退
 
-这个项目的设计重点，就是把这三件事做成可持续的工程能力。
+这个项目的设计重点，就是把“直接写正文”和“在需要时获得规划帮助”做成一条连续工作流，而不是让作者在多个模式和工具人格之间来回跳转。
 
 ### 项目优势（少术语版）
 
@@ -29,22 +29,27 @@ AI 辅助小说写作平台（Monorepo：`apps/api` + `apps/web`）。
 
 ## 核心能力
 
-### 1) 写作对话与动作闭环
+### 1) 单一写作工作区
+- 首屏默认是纯写作工作区：正文编辑器 + 章节结构，减少认知负担
+- 右侧中部悬浮按钮可呼出写作助手抽屉，用于章节推进、情节规划、伏笔整理
+- 改写能力保留在正文就地交互里：选中后润色 / 扩写，避免打断写作流
+
+### 2) 写作对话与动作闭环
 - `POST /api/chat/stream` 实时对话（SSE）
 - AI 建议走“提议 -> 应用/拒绝/撤销”
 - 全程有审计日志，便于追溯谁在什么时候改了什么
 
-### 2) 章节工作区
+### 3) 章节工作区
 - 章节内容保存、历史版本、回滚
 - 结构化规划：Volume / Chapter / Scene Beat / Foreshadowing
 - 支持 Prompt 模板与知识注入（settings/cards）
 
-### 3) 一致性治理
+### 4) 一致性治理
 - 一致性报告支持手动触发
 - worker 支持每日自动巡检
 - 图谱候选事实审阅、实体合并巡检、章节关系时间线可视化
 
-### 4) 可验证的质量门槛
+### 5) 可验证的质量门槛
 - API 单元测试 + Web E2E
 - 检索相关改动可走 RAGAS 回归门禁（可选）
 - CI 可在合并前拦截明显退化
@@ -195,6 +200,20 @@ npm run dev
 
 ---
 
+## 产品路径（写作优先）
+
+默认产品路径只围绕三件事组织：
+
+- 写作：直接编辑正文、切换章节、自动保存、版本回滚
+- 规划：通过写作助手抽屉规划章节推进、Scene Beat、伏笔与设定
+- 高级：在需要时展开 Prompt、evidence、审计、图谱检视等专家能力
+
+这意味着：
+
+- 不再要求作者先理解不同页面人格再开始写作
+- 规划帮助通过写作助手渐进展开，而不是变成第二主界面
+- 改写能力通过正文选区触发，而不是散落在多个入口
+
 ## 配置哲学（默认即最佳实践）
 
 配置已从“全量可配”收敛为“**profile 默认 + 少量策略开关**”：
@@ -257,15 +276,15 @@ CONTEXT_COMPRESSION_MODE=rerank
   - `AUTH_TOKENS=local-user:<token>`
   - `VITE_API_TOKEN=<token>`
 - 默认示例 token `local-dev-token` 仅限本地开发使用。
-- 浏览器 WebSocket 不能自定义 `Authorization` header；Ghost Text 流式补全会把同一个 `VITE_API_TOKEN` 挂到 `?token=` 查询参数上，API 端会等价校验。
+- 浏览器 WebSocket 不能自定义 `Authorization` header；若后续启用任何浏览器侧流式能力，需要把同一个 `VITE_API_TOKEN` 挂到 `?token=` 查询参数上，API 端会等价校验。
 
-### Structured Outputs 与 Ghost Text 约定
+### Structured Outputs 与改写交互约定
 
 - `LLM_STRUCTURED_MODE` 默认是 `strict`：优先走 `json_schema` / tool calling，拿不到结构化响应就快速失败，不再做正则抠 JSON。
 - 只有显式设置为 `compat` 时，`openai_compatible`/兼容 OpenAI 协议但不支持 `json_schema`、tool calling 的供应商，才允许降级到 `response_format={"type":"json_object"}`。
 - 即使在 `compat` 模式下，服务端也只接受“纯 JSON”或“单个 fenced JSON block”，再交给 Pydantic 校验，不接受自由文本混排 JSON。
-- Ghost Text 自动补全当前走 WebSocket 流式推送；浏览器侧在停顿后请求建议，`Tab` 接受整段，`Ctrl+ArrowRight` 接受一个词。
-- Tiptap 润色/扩写不会直接覆盖正文，而是渲染 Git-style Diff：删除为红色删除线，新增为绿色高亮，每条修改都可单独“接受/忽略”。
+- 选区润色/扩写不会直接覆盖正文，而是渲染 Git-style Diff：删除为红色删除线，新增为绿色高亮，每条修改都可单独“接受/忽略”。
+- 助手回复仍可写回正文，但默认路径是“先写，再按需规划，再就地改写”，而不是持续依赖自动续写。
 
 ---
 

@@ -1,0 +1,408 @@
+{
+  "generated_at": "2026-03-12T13:48:19.131756+00:00",
+  "threshold": 0.55,
+  "gate_score": NaN,
+  "averages": {
+    "faithfulness": NaN,
+    "answer_relevancy": NaN,
+    "context_precision": 0.9558,
+    "context_recall": 1.0
+  },
+  "subset_scores": {
+    "global": {
+      "sample_count": 8,
+      "averages": {
+        "faithfulness": NaN,
+        "answer_relevancy": NaN,
+        "context_precision": 0.9554,
+        "context_recall": 1.0
+      },
+      "gate_score": NaN
+    },
+    "character": {
+      "sample_count": 4,
+      "averages": {
+        "faithfulness": NaN,
+        "answer_relevancy": NaN,
+        "context_precision": 0.9565,
+        "context_recall": 1.0
+      },
+      "gate_score": NaN
+    }
+  },
+  "trend": {
+    "available": false,
+    "baseline_report": "/home/wcn/Desktop/novel-platform/apps/api/evals/data/novel_rag_baseline.json",
+    "reason": "baseline_report_missing_or_invalid"
+  },
+  "rag_mode": "mix",
+  "deterministic_first": false,
+  "sample_count": 12,
+  "items": [
+    {
+      "id": "novel-v1-001",
+      "question": "林澈的核心动机和底线分别是什么？",
+      "ground_truth": "林澈的核心动机是复仇，底线是不伤无辜。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 6,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-002",
+      "question": "周夜与林澈的关系如何变化？",
+      "ground_truth": "周夜与林澈从对立逐步转为有限合作，但仍互相提防。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 8,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-003",
+      "question": "第一卷时间线上，风桥埋伏和黑潮夜战的先后顺序是什么？",
+      "ground_truth": "先发生风桥埋伏，再发生黑潮夜战。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 4,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-004",
+      "question": "目前世界观里明示的三大势力是什么？",
+      "ground_truth": "明示的三大势力是曜庭、夜行会和盐港同盟。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 4,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-005",
+      "question": "如果以周夜 POV 写作，最重要的信息边界是什么？",
+      "ground_truth": "周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 5,
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "周夜"
+    },
+    {
+      "id": "novel-v1-006",
+      "question": "设定里“潮印”能力在代价和限制上有什么关键规则？",
+      "ground_truth": "潮印短时强化但会透支精神，连续过度使用会触发幻听与记忆错位。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 4,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-007",
+      "question": "从林澈视角看，他与曜庭的关系在当前设定里如何定义？",
+      "ground_truth": "林澈与曜庭是敌对关系。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 8,
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "林澈"
+    },
+    {
+      "id": "novel-v1-008",
+      "question": "林澈与盐港同盟在设定里是什么关系？",
+      "ground_truth": "林澈与盐港同盟是临时合作关系。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 9,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-009",
+      "question": "叙事中“灰钥”这个道具的功能和限制是什么？",
+      "ground_truth": "灰钥可短暂开启封印门，但每次使用会暴露使用者位置并增加被追踪风险。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 1,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "id": "novel-v1-010",
+      "question": "在北线事件中，若按林澈 POV，他的公开目标与隐性目标分别是什么？",
+      "ground_truth": "公开目标是护送证人入港，隐性目标是追查父亲旧案的真凶线索。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 7,
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "林澈"
+    },
+    {
+      "id": "novel-v1-011",
+      "question": "黑潮夜战后，周夜对林澈态度的变化是什么？",
+      "ground_truth": "黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 5,
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "周夜"
+    },
+    {
+      "id": "novel-v1-012",
+      "question": "如果写“风桥埋伏”回忆段，需要避免哪类时间线错误？",
+      "ground_truth": "应避免把风桥埋伏写在黑潮夜战之后，因为设定顺序是风桥埋伏在先。",
+      "answer": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "contexts_count": 2,
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    }
+  ],
+  "ragas_rows": [
+    {
+      "user_input": "林澈的核心动机和底线分别是什么？",
+      "retrieved_contexts": [
+        "character.linche.motivation\n{\"text\": \"林澈的核心动机是复仇，为父亲旧案追查真凶。底线是不伤无辜，即使在极端情况下也坚守此原则。\"}",
+        "林澈\n{\"identity\": \"主角，复仇者\", \"description\": \"林澈，年轻剑客，父亲被曜庭陷害致死。核心动机是复仇，底线是不伤无辜。与曜庭敌对，与盐港同盟临时合作。拥有潮印能力但极少使用。\", \"traits\": [\"隐忍\", \"果决\", \"重情义\"], \"faction\": \"独立/盐港同盟临时盟友\"}",
+        "character.linche.north_mission\n{\"text\": \"在北线事件中，林澈的公开目标是护送证人入港，隐性目标是追查父亲旧案的真凶线索。这两个目标有时会产生冲突。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}",
+        "曜庭\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，掌控中枢权力。与林澈敌对，陷害了林澈的父亲。内部有内阁密会机制，信息高度保密。\", \"traits\": [\"权力中枢\", \"阴谋\"], \"faction\": \"曜庭\"}",
+        "character.linche.faction\n{\"text\": \"林澈与曜庭是敌对关系。林澈与盐港同盟是临时合作关系，双方基于共同利益暂时联手。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "林澈的核心动机是复仇，底线是不伤无辜。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.23616301300546727,
+      "context_precision": 0.99999999995,
+      "context_recall": 1.0,
+      "id": "novel-v1-001",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "周夜与林澈的关系如何变化？",
+      "retrieved_contexts": [
+        "character.zhouye.relationship\n{\"text\": \"周夜与林澈从对立逐步转为有限合作，但仍互相提防。黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}",
+        "曜庭\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，掌控中枢权力。与林澈敌对，陷害了林澈的父亲。内部有内阁密会机制，信息高度保密。\", \"traits\": [\"权力中枢\", \"阴谋\"], \"faction\": \"曜庭\"}",
+        "盐港同盟\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，沿海商贸联盟。与林澈是临时合作关系，基于共同利益联手对抗曜庭。\", \"traits\": [\"商贸\", \"务实\"], \"faction\": \"盐港同盟\"}",
+        "character.linche.motivation\n{\"text\": \"林澈的核心动机是复仇，为父亲旧案追查真凶。底线是不伤无辜，即使在极端情况下也坚守此原则。\"}",
+        "character.linche.faction\n{\"text\": \"林澈与曜庭是敌对关系。林澈与盐港同盟是临时合作关系，双方基于共同利益暂时联手。\"}",
+        "character.zhouye.pov_boundary\n{\"text\": \"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。这是最重要的信息边界。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "周夜与林澈从对立逐步转为有限合作，但仍互相提防。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.4325461702603221,
+      "context_precision": 0.9999999999666667,
+      "context_recall": 1.0,
+      "id": "novel-v1-002",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "第一卷时间线上，风桥埋伏和黑潮夜战的先后顺序是什么？",
+      "retrieved_contexts": [
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}",
+        "timeline.fengqiao_warning\n{\"text\": \"写风桥埋伏回忆段时，应避免把风桥埋伏写在黑潮夜战之后，因为设定顺序是风桥埋伏在先。这是常见的时间线错误。\"}",
+        "character.zhouye.relationship\n{\"text\": \"周夜与林澈从对立逐步转为有限合作，但仍互相提防。黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "先发生风桥埋伏，再发生黑潮夜战。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.40630462219096186,
+      "context_precision": 0.99999999995,
+      "context_recall": 1.0,
+      "id": "novel-v1-003",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "目前世界观里明示的三大势力是什么？",
+      "retrieved_contexts": [
+        "world.factions\n{\"text\": \"目前世界观里明示的三大势力是曜庭、夜行会和盐港同盟。曜庭掌控中枢权力，夜行会是地下势力，盐港同盟是沿海商贸联盟。\"}",
+        "盐港同盟\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，沿海商贸联盟。与林澈是临时合作关系，基于共同利益联手对抗曜庭。\", \"traits\": [\"商贸\", \"务实\"], \"faction\": \"盐港同盟\"}",
+        "曜庭\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，掌控中枢权力。与林澈敌对，陷害了林澈的父亲。内部有内阁密会机制，信息高度保密。\", \"traits\": [\"权力中枢\", \"阴谋\"], \"faction\": \"曜庭\"}",
+        "夜行会\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，地下势力网络。周夜是其核心成员。行事隐秘，与曜庭和盐港同盟都有复杂的利益纠葛。\", \"traits\": [\"地下势力\", \"情报网络\"], \"faction\": \"夜行会\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "明示的三大势力是曜庭、夜行会和盐港同盟。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.2308219334526758,
+      "context_precision": 0.7499999999625,
+      "context_recall": 1.0,
+      "id": "novel-v1-004",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "如果以周夜 POV 写作，最重要的信息边界是什么？",
+      "retrieved_contexts": [
+        "character.zhouye.pov_boundary\n{\"text\": \"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。这是最重要的信息边界。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}",
+        "character.zhouye.relationship\n{\"text\": \"周夜与林澈从对立逐步转为有限合作，但仍互相提防。黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}",
+        "夜行会\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，地下势力网络。周夜是其核心成员。行事隐秘，与曜庭和盐港同盟都有复杂的利益纠葛。\", \"traits\": [\"地下势力\", \"情报网络\"], \"faction\": \"夜行会\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.34113968128547206,
+      "context_precision": 0.94999999997625,
+      "context_recall": 1.0,
+      "id": "novel-v1-005",
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "周夜"
+    },
+    {
+      "user_input": "设定里“潮印”能力在代价和限制上有什么关键规则？",
+      "retrieved_contexts": [
+        "world.ability.chaoyin\n{\"text\": \"潮印能力可短时强化使用者的战斗力和感知力，但会透支精神。连续过度使用会触发幻听与记忆错位，严重时可能导致人格分裂。\"}",
+        "林澈\n{\"identity\": \"主角，复仇者\", \"description\": \"林澈，年轻剑客，父亲被曜庭陷害致死。核心动机是复仇，底线是不伤无辜。与曜庭敌对，与盐港同盟临时合作。拥有潮印能力但极少使用。\", \"traits\": [\"隐忍\", \"果决\", \"重情义\"], \"faction\": \"独立/盐港同盟临时盟友\"}",
+        "world.item.huiyao\n{\"text\": \"灰钥可短暂开启封印门，但每次使用会暴露使用者位置并增加被追踪风险。灰钥有使用次数限制，过度使用会导致钥体碎裂。\"}",
+        "timeline.fengqiao_warning\n{\"text\": \"写风桥埋伏回忆段时，应避免把风桥埋伏写在黑潮夜战之后，因为设定顺序是风桥埋伏在先。这是常见的时间线错误。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "潮印短时强化但会透支精神，连续过度使用会触发幻听与记忆错位。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.4223395837462787,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0,
+      "id": "novel-v1-006",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "从林澈视角看，他与曜庭的关系在当前设定里如何定义？",
+      "retrieved_contexts": [
+        "character.linche.faction\n{\"text\": \"林澈与曜庭是敌对关系。林澈与盐港同盟是临时合作关系，双方基于共同利益暂时联手。\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}",
+        "林澈\n{\"identity\": \"主角，复仇者\", \"description\": \"林澈，年轻剑客，父亲被曜庭陷害致死。核心动机是复仇，底线是不伤无辜。与曜庭敌对，与盐港同盟临时合作。拥有潮印能力但极少使用。\", \"traits\": [\"隐忍\", \"果决\", \"重情义\"], \"faction\": \"独立/盐港同盟临时盟友\"}",
+        "character.zhouye.pov_boundary\n{\"text\": \"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。这是最重要的信息边界。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}",
+        "曜庭\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，掌控中枢权力。与林澈敌对，陷害了林澈的父亲。内部有内阁密会机制，信息高度保密。\", \"traits\": [\"权力中枢\", \"阴谋\"], \"faction\": \"曜庭\"}",
+        "盐港同盟\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，沿海商贸联盟。与林澈是临时合作关系，基于共同利益联手对抗曜庭。\", \"traits\": [\"商贸\", \"务实\"], \"faction\": \"盐港同盟\"}",
+        "character.linche.motivation\n{\"text\": \"林澈的核心动机是复仇，为父亲旧案追查真凶。底线是不伤无辜，即使在极端情况下也坚守此原则。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "林澈与曜庭是敌对关系。",
+      "faithfulness": NaN,
+      "answer_relevancy": NaN,
+      "context_precision": 0.8761904761729524,
+      "context_recall": 1.0,
+      "id": "novel-v1-007",
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "林澈"
+    },
+    {
+      "user_input": "林澈与盐港同盟在设定里是什么关系？",
+      "retrieved_contexts": [
+        "character.linche.faction\n{\"text\": \"林澈与曜庭是敌对关系。林澈与盐港同盟是临时合作关系，双方基于共同利益暂时联手。\"}",
+        "林澈\n{\"identity\": \"主角，复仇者\", \"description\": \"林澈，年轻剑客，父亲被曜庭陷害致死。核心动机是复仇，底线是不伤无辜。与曜庭敌对，与盐港同盟临时合作。拥有潮印能力但极少使用。\", \"traits\": [\"隐忍\", \"果决\", \"重情义\"], \"faction\": \"独立/盐港同盟临时盟友\"}",
+        "盐港同盟\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，沿海商贸联盟。与林澈是临时合作关系，基于共同利益联手对抗曜庭。\", \"traits\": [\"商贸\", \"务实\"], \"faction\": \"盐港同盟\"}",
+        "world.factions\n{\"text\": \"目前世界观里明示的三大势力是曜庭、夜行会和盐港同盟。曜庭掌控中枢权力，夜行会是地下势力，盐港同盟是沿海商贸联盟。\"}",
+        "夜行会\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，地下势力网络。周夜是其核心成员。行事隐秘，与曜庭和盐港同盟都有复杂的利益纠葛。\", \"traits\": [\"地下势力\", \"情报网络\"], \"faction\": \"夜行会\"}",
+        "character.linche.motivation\n{\"text\": \"林澈的核心动机是复仇，为父亲旧案追查真凶。底线是不伤无辜，即使在极端情况下也坚守此原则。\"}",
+        "character.zhouye.relationship\n{\"text\": \"周夜与林澈从对立逐步转为有限合作，但仍互相提防。黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。\"}",
+        "character.zhouye.pov_boundary\n{\"text\": \"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。这是最重要的信息边界。\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "林澈与盐港同盟是临时合作关系。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.2221551037451583,
+      "context_precision": 0.8928571428348213,
+      "context_recall": 1.0,
+      "id": "novel-v1-008",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "叙事中“灰钥”这个道具的功能和限制是什么？",
+      "retrieved_contexts": [
+        "world.item.huiyao\n{\"text\": \"灰钥可短暂开启封印门，但每次使用会暴露使用者位置并增加被追踪风险。灰钥有使用次数限制，过度使用会导致钥体碎裂。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "灰钥可短暂开启封印门，但每次使用会暴露使用者位置并增加被追踪风险。",
+      "faithfulness": NaN,
+      "answer_relevancy": NaN,
+      "context_precision": 0.9999999999,
+      "context_recall": 1.0,
+      "id": "novel-v1-009",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    },
+    {
+      "user_input": "在北线事件中，若按林澈 POV，他的公开目标与隐性目标分别是什么？",
+      "retrieved_contexts": [
+        "character.linche.north_mission\n{\"text\": \"在北线事件中，林澈的公开目标是护送证人入港，隐性目标是追查父亲旧案的真凶线索。这两个目标有时会产生冲突。\"}",
+        "character.linche.motivation\n{\"text\": \"林澈的核心动机是复仇，为父亲旧案追查真凶。底线是不伤无辜，即使在极端情况下也坚守此原则。\"}",
+        "character.linche.faction\n{\"text\": \"林澈与曜庭是敌对关系。林澈与盐港同盟是临时合作关系，双方基于共同利益暂时联手。\"}",
+        "character.zhouye.relationship\n{\"text\": \"周夜与林澈从对立逐步转为有限合作，但仍互相提防。黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。\"}",
+        "character.zhouye.pov_boundary\n{\"text\": \"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。这是最重要的信息边界。\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "公开目标是护送证人入港，隐性目标是追查父亲旧案的真凶线索。",
+      "faithfulness": 0.0,
+      "answer_relevancy": NaN,
+      "context_precision": 0.99999999995,
+      "context_recall": 1.0,
+      "id": "novel-v1-010",
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "林澈"
+    },
+    {
+      "user_input": "黑潮夜战后，周夜对林澈态度的变化是什么？",
+      "retrieved_contexts": [
+        "character.zhouye.relationship\n{\"text\": \"周夜与林澈从对立逐步转为有限合作，但仍互相提防。黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。\"}",
+        "周夜\n{\"identity\": \"亦敌亦友，夜行会成员\", \"description\": \"周夜，夜行会核心成员，与林澈从对立逐步转为有限合作。黑潮夜战后态度从纯敌意转为谨慎合作，但信任仍不足。POV写作时不能知道曜庭内阁密会记录和林澈独白。\", \"traits\": [\"多疑\", \"精明\", \"务实\"], \"faction\": \"夜行会\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}",
+        "character.zhouye.pov_boundary\n{\"text\": \"周夜 POV 不能直接知道曜庭内阁密会记录，也不能直接读取林澈独白。这是最重要的信息边界。\"}",
+        "夜行会\n{\"identity\": \"势力组织\", \"description\": \"三大势力之一，地下势力网络。周夜是其核心成员。行事隐秘，与曜庭和盐港同盟都有复杂的利益纠葛。\", \"traits\": [\"地下势力\", \"情报网络\"], \"faction\": \"夜行会\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "黑潮夜战后周夜对林澈从纯敌意转为谨慎合作，但信任仍不足。",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.4254750274735449,
+      "context_precision": 0.9999999999666667,
+      "context_recall": 1.0,
+      "id": "novel-v1-011",
+      "subset": "character",
+      "pov_mode": "character",
+      "pov_anchor": "周夜"
+    },
+    {
+      "user_input": "如果写“风桥埋伏”回忆段，需要避免哪类时间线错误？",
+      "retrieved_contexts": [
+        "timeline.fengqiao_warning\n{\"text\": \"写风桥埋伏回忆段时，应避免把风桥埋伏写在黑潮夜战之后，因为设定顺序是风桥埋伏在先。这是常见的时间线错误。\"}",
+        "timeline.volume1\n{\"text\": \"第一卷时间线：先发生风桥埋伏，再发生黑潮夜战。风桥埋伏是林澈首次与曜庭正面冲突，黑潮夜战是周夜与林澈被迫联手的转折点。\"}"
+      ],
+      "response": "模型调用失败：Client error '404 Not Found' for url 'https://www.foxnio.com/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+      "reference": "应避免把风桥埋伏写在黑潮夜战之后，因为设定顺序是风桥埋伏在先。",
+      "faithfulness": 0.0,
+      "answer_relevancy": NaN,
+      "context_precision": 0.99999999995,
+      "context_recall": 1.0,
+      "id": "novel-v1-012",
+      "subset": "global",
+      "pov_mode": "global",
+      "pov_anchor": null
+    }
+  ]
+}

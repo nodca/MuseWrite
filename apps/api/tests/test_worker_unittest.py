@@ -234,6 +234,49 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(mock_prewarm.call_args.args[0], 13)
         self.assertEqual(mock_prewarm.call_args.kwargs.get("current_chapter"), 12)
 
+    def test_process_book_memory_job_returns_drop_invalid_when_chapter_id_missing(self) -> None:
+        result, attempt, error = worker_module._process_book_memory_consolidation_job(
+            {"project_id": 11, "chapter_id": 0, "attempt": 7}
+        )
+        self.assertEqual(result, "drop_invalid")
+        self.assertEqual(attempt, 7)
+        self.assertEqual(error, "project_or_chapter_invalid")
+
+    def test_process_book_memory_job_returns_retry_locked_when_project_lock_busy(self) -> None:
+        job = {"project_id": 11, "chapter_id": 3, "attempt": 1}
+
+        with patch("app.worker._project_advisory_lock", _mock_project_lock(False)):
+            result, attempt, error = worker_module._process_book_memory_consolidation_job(job)
+
+        self.assertEqual(result, "retry_locked")
+        self.assertEqual(attempt, 1)
+        self.assertEqual(error, "project_lock_busy")
+
+    def test_process_book_memory_job_runs_consolidation(self) -> None:
+        job = {
+            "project_id": 21,
+            "chapter_id": 9,
+            "scene_beat_id": 4,
+            "operator_id": "tester",
+            "reason": "unit_test",
+            "attempt": 2,
+        }
+
+        with patch("app.worker._project_advisory_lock", _mock_project_lock(True)), patch(
+            "app.worker.run_book_memory_consolidation",
+            return_value={"status": "ok"},
+        ) as mock_run:
+            result, attempt, error = worker_module._process_book_memory_consolidation_job(job)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(attempt, 2)
+        self.assertEqual(error, "ok")
+        self.assertEqual(mock_run.call_args.kwargs.get("project_id"), 21)
+        self.assertEqual(mock_run.call_args.kwargs.get("chapter_id"), 9)
+        self.assertEqual(mock_run.call_args.kwargs.get("scene_beat_id"), 4)
+        self.assertEqual(mock_run.call_args.kwargs.get("operator_id"), "tester")
+        self.assertEqual(mock_run.call_args.kwargs.get("reason"), "unit_test")
+
     def test_process_graph_job_drops_when_pending_mutation_canceled(self) -> None:
         mutation_id = "m-canceled-1"
         action_id = self._create_action(

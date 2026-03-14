@@ -806,7 +806,7 @@ def _clamp_temperature(value: float) -> float:
 
 def _normalize_temperature_profile(value: str | None) -> str | None:
     mode = str(value or "").strip().lower()
-    if mode in {"action", "chat", "ghost", "brainstorm"}:
+    if mode in {"action", "chat", "suggestion", "brainstorm"}:
         return mode
     return None
 
@@ -827,8 +827,8 @@ def _resolve_temperature(
     profile = profile or "chat"
     if profile == "action":
         return _clamp_temperature(settings.llm_temperature_action), profile, "profile_action"
-    if profile == "ghost":
-        return _clamp_temperature(settings.llm_temperature_ghost), profile, "profile_ghost"
+    if profile == "suggestion":
+        return _clamp_temperature(settings.llm_temperature_suggestion), "suggestion", "profile_suggestion"
     if profile == "brainstorm":
         return _clamp_temperature(settings.llm_temperature_brainstorm), profile, "profile_brainstorm"
     return _clamp_temperature(settings.llm_temperature_chat), profile, "profile_chat"
@@ -2169,3 +2169,5 @@ def generate_structured_sync(
             raise ValueError("structured_output_generation_failed")
 
     return StructuredGenerationResult(parsed=parsed, raw_content=raw_content, usage=usage)
+
+

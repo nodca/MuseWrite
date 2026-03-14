@@ -5,12 +5,15 @@ from sqlmodel import Session
 from app.core.config import settings
 from app.services.base_queue import BaseQueue, DeadLetterQueue
 
+_QUEUE = "index_lifecycle_jobs"
+_DEAD_LETTER_QUEUE = "index_lifecycle_dead_letters"
+
 def _queue_name() -> str:
-    return settings.index_lifecycle_queue_name.strip()
+    return _QUEUE
 
 
 def _dead_letter_queue_name() -> str:
-    return settings.index_lifecycle_dead_letter_queue_name.strip()
+    return _DEAD_LETTER_QUEUE
 
 
 _INDEX_LIFECYCLE_QUEUE = BaseQueue(

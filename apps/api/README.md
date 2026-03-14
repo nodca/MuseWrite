@@ -154,8 +154,8 @@ Prompt design (NovelForge-inspired, adapted):
 ## Endpoints
 
 - `POST /api/chat/stream`
-- `POST /api/chat/ghost-text`
-- `WS /api/chat/ghost-text`
+- `POST /api/chat/inline-suggestions`
+- `WS /api/chat/inline-suggestions`
 - `GET /api/chat/projects/{project_id}/sessions`
 - `PUT /api/chat/projects/{project_id}/sessions/{session_id}`
 - `DELETE /api/chat/projects/{project_id}/sessions/{session_id}`
@@ -227,7 +227,7 @@ Note: `evidence` is persisted per assistant message as `context_xray` and is ret
 }
 ```
 
-`POST /api/chat/stream` and `POST /api/chat/ghost-text` both support outline constraints:
+`POST /api/chat/stream` and `POST /api/chat/inline-suggestions` both support outline constraints:
 
 ```json
 {
@@ -239,7 +239,7 @@ Note: `evidence` is persisted per assistant message as `context_xray` and is ret
 Ghost Text WebSocket auth note:
 
 - Browser clients cannot attach custom `Authorization` headers during the WebSocket handshake.
-- The web app therefore forwards `VITE_API_TOKEN` via `?token=` on `WS /api/chat/ghost-text`.
+- The web app therefore forwards `VITE_API_TOKEN` via `?token=` on `WS /api/chat/inline-suggestions`.
 - API treats that token the same as `Authorization: Bearer <token>`.
 - Current streaming provider support is `openai_compatible` / `deepseek`; other providers should keep using the non-streaming rewrite endpoints until a native WS path is added.
 
@@ -283,3 +283,5 @@ python scripts/drop_legacy_project_draft_tables.py
   "idempotency_key": "sess-1-setting-currency-v1"
 }
 ```
+
+

@@ -5,7 +5,15 @@ from app.core.config import settings
 import app.models  # noqa: F401  # ensure model metadata is registered
 
 
-engine = create_engine(settings.database_url, echo=False, pool_pre_ping=True)
+engine = create_engine(
+    settings.database_url,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
+    pool_timeout=settings.database_pool_timeout,
+    pool_recycle=settings.database_pool_recycle,
+)
 
 
 def _has_column(table_name: str, column_name: str) -> bool:

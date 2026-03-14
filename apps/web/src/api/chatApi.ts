@@ -14,10 +14,8 @@ import type {
   GraphCandidateListQuery,
   GraphCandidateListResponse,
   GraphTimelineSnapshot,
-  GhostTextRewriteRequest,
-  GhostTextResponse,
-  GhostTextStreamEvent,
-  GhostTextStreamRequest,
+  SelectionRewriteRequest,
+  SelectionRewriteResponse,
   ModelProfile,
   ModelProfileDeleteResult,
   ModelProfileUpsertPayload,
@@ -367,61 +365,18 @@ export async function streamChat(
   });
 }
 
-export function generateGhostPolish(payload: GhostTextRewriteRequest): Promise<GhostTextResponse> {
-  return requestJson<GhostTextResponse>("/api/chat/ghost-text/polish", {
+export function polishSelection(payload: SelectionRewriteRequest): Promise<SelectionRewriteResponse> {
+  return requestJson<SelectionRewriteResponse>("/api/chat/rewrite/polish", {
     method: "POST",
     body: JSON.stringify(payload),
   });
 }
 
-export function generateGhostExpand(payload: GhostTextRewriteRequest): Promise<GhostTextResponse> {
-  return requestJson<GhostTextResponse>("/api/chat/ghost-text/expand", {
+export function expandSelection(payload: SelectionRewriteRequest): Promise<SelectionRewriteResponse> {
+  return requestJson<SelectionRewriteResponse>("/api/chat/rewrite/expand", {
     method: "POST",
     body: JSON.stringify(payload),
   });
-}
-
-export function openGhostTextSocket(
-  onEvent: (event: GhostTextStreamEvent) => void,
-  options?: {
-    onOpen?: () => void;
-    onClose?: () => void;
-    onError?: () => void;
-  }
-): WebSocket {
-  const url = new URL(resolveWebSocketUrl("/api/chat/ghost-text"));
-  if (API_TOKEN) {
-    // Browsers cannot set custom headers for WebSocket handshakes. Carry the
-    // existing dev token in the query string so the API can authenticate.
-    url.searchParams.set("token", API_TOKEN);
-  }
-  const socket = new WebSocket(url.toString());
-  socket.addEventListener("open", () => options?.onOpen?.());
-  socket.addEventListener("close", () => options?.onClose?.());
-  socket.addEventListener("error", () => options?.onError?.());
-  socket.addEventListener("message", (event) => {
-    try {
-      const parsed = JSON.parse(String(event.data ?? "{}")) as GhostTextStreamEvent;
-      if (!parsed || typeof parsed !== "object") return;
-      if (
-        parsed.type !== "start" &&
-        parsed.type !== "delta" &&
-        parsed.type !== "done" &&
-        parsed.type !== "error"
-      ) {
-        return;
-      }
-      onEvent(parsed);
-    } catch {
-      // ignore malformed events
-    }
-  });
-  return socket;
-}
-
-export function sendGhostTextStreamRequest(socket: WebSocket, payload: GhostTextStreamRequest): void {
-  if (socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify(payload));
 }
 
 export function getSessionMessages(sessionId: number): Promise<ChatMessageDto[]> {
@@ -917,3 +872,6 @@ export function deleteForeshadowingCard(
     method: "DELETE",
   });
 }
+
+
+

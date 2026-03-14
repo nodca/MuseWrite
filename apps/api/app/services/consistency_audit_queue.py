@@ -6,8 +6,10 @@ from app.core.config import settings
 from app.models.chat import AsyncJob
 from app.services.base_queue import BaseQueue
 
+_QUEUE = "consistency_audit_jobs"
+
 def _queue_name() -> str:
-    return settings.consistency_audit_queue_name.strip()
+    return _QUEUE
 
 
 _CONSISTENCY_AUDIT_QUEUE = BaseQueue(

@@ -2,8 +2,13 @@ FROM python:3.12-slim AS base
 
 ARG PRELOAD_RERANKER_ONNX=false
 
+# Install uv from official image (single static binary, ~15MB).
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1 \
     CONTEXT_COMPRESSION_MODE=rerank \
     CONTEXT_COMPRESSION_RERANKER_ENABLED=true \
     CONTEXT_COMPRESSION_RERANKER_MODEL=BAAI/bge-reranker-v2-minicpm-layerwise \
@@ -16,12 +21,12 @@ WORKDIR /app
 
 COPY requirements-docker.txt ./requirements.txt
 COPY requirements-export.txt ./requirements-export.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv pip install --no-cache -r requirements.txt
 
 COPY app ./app
 COPY scripts ./scripts
 RUN if [ "$PRELOAD_RERANKER_ONNX" = "true" ]; then \
-      pip install --no-cache-dir -r requirements-export.txt && \
+      uv pip install --no-cache -r requirements-export.txt && \
       python scripts/export_reranker_onnx.py \
         --model-id "$CONTEXT_COMPRESSION_RERANKER_MODEL" \
         --output "$CONTEXT_COMPRESSION_RERANKER_ONNX_PATH" \

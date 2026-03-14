@@ -43,5 +43,7 @@ More product-level usage details: `docs/author-manual.md`
 ## Notes
 
 - `VITE_API_TOKEN` is reused for both HTTP requests and Ghost Text WebSocket auth.
-- Because browsers cannot set custom headers for WebSocket handshakes, the frontend sends that token as `?token=` when opening `/api/chat/ghost-text`.
+- Because browsers cannot set custom headers for WebSocket handshakes, the frontend sends that token as `?token=` when opening `/api/chat/inline-suggestions`.
 - If your backend uses an `openai_compatible` provider that does not support `json_schema` or tool calling, set `LLM_STRUCTURED_MODE=compat` on the API side. The default remains `strict`.
+
+

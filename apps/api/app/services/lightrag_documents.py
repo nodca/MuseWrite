@@ -8,6 +8,15 @@ import httpx
 
 from app.core.config import settings
 
+# ---------------------------------------------------------------------------
+# LightRAG API path constants (implementation detail, not user-facing).
+# ---------------------------------------------------------------------------
+_PATH_DOCUMENTS_TEXT = "/documents/text"
+_PATH_DOCUMENTS_TEXTS = "/documents/texts"
+_PATH_DOCUMENTS_PAGINATED = "/documents/paginated"
+_PATH_DOCUMENTS_DELETE = "/documents/delete_document"
+_PATH_DOCUMENTS_PIPELINE_STATUS = "/documents/pipeline_status"
+
 
 # ---------------------------------------------------------------------------
 # Chunk 预处理：场景分段
@@ -220,7 +229,7 @@ def insert_text_document(
         chunk_source = f"{source}#chunk-{idx}" if len(chunks) > 1 else source
         payload = _request_json(
             "POST",
-            path=settings.lightrag_documents_text_path,
+            path=_PATH_DOCUMENTS_TEXT,
             fallback_path="/documents/text",
             json_body={"text": chunk, "file_source": chunk_source},
         )
@@ -251,7 +260,7 @@ def insert_storycard_document(
 
     payload = _request_json(
         "POST",
-        path=settings.lightrag_documents_text_path,
+        path=_PATH_DOCUMENTS_TEXT,
         fallback_path="/documents/text",
         json_body={"text": flat_text, "file_source": source},
     )
@@ -284,7 +293,7 @@ def list_project_documents(
 
     payload = _request_json(
         "POST",
-        path=settings.lightrag_documents_paginated_path,
+        path=_PATH_DOCUMENTS_PAGINATED,
         fallback_path="/documents/paginated",
         json_body=body,
     )
@@ -331,7 +340,7 @@ def delete_documents(
     }
     payload = _request_json(
         "DELETE",
-        path=settings.lightrag_documents_delete_path,
+        path=_PATH_DOCUMENTS_DELETE,
         fallback_path="/documents/delete_document",
         json_body=body,
     )
@@ -347,6 +356,6 @@ def delete_documents(
 def get_pipeline_status() -> dict[str, Any]:
     return _request_json(
         "GET",
-        path=settings.lightrag_documents_pipeline_status_path,
+        path=_PATH_DOCUMENTS_PIPELINE_STATUS,
         fallback_path="/documents/pipeline_status",
     )

@@ -239,25 +239,23 @@ async function installMockChatApi(page: Page, assistantText: string): Promise<vo
 }
 
 test.describe("smoke regression", () => {
-  test("defaults to writing mode and toggles to pro mode", async ({ page }) => {
+  test("editor home opens in the writing-first shell", async ({ page }) => {
     await installMockChatApi(page, "smoke-mode-toggle");
     await page.goto("/");
 
-    await expect(page.locator(".page-shell")).toHaveClass(/\bmode-writing\b/);
-    await expect(page.getByTestId("ui-mode-toggle")).toHaveText("切到工作台模式");
-    await expect(page.getByRole("heading", { name: "工作台面板" })).toBeHidden();
-
-    await page.getByTestId("ui-mode-toggle").click();
-
-    await expect(page.locator(".page-shell")).toHaveClass(/\bmode-pro\b/);
-    await expect(page.getByTestId("ui-mode-toggle")).toHaveText("切到写作模式");
-    await expect(page.getByRole("heading", { name: "工作台面板" })).toBeVisible();
+    await expect(page.getByTestId("ui-mode-toggle")).toHaveCount(0);
+    await expect(page.locator(".assistant-fab")).toHaveText("写作助手");
+    await expect(page.getByRole("button", { name: "写作助手" })).toBeVisible();
+    await expect(page.locator(".page-shell")).toBeVisible();
+    await expect(page.getByRole("button", { name: "展开进阶面板" })).toBeVisible();
+    await expect(page.getByRole("banner").getByRole("button", { name: "专注模式" })).toBeVisible();
   });
 
   test("shell interactions remain healthy", async ({ page }) => {
     await installMockChatApi(page, "smoke-shell");
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "AI 辅助写作工作台" })).toBeVisible();
+    await expect(page.locator(".page-shell")).toBeVisible();
+    await expect(page.locator(".advanced-panel-stack")).toHaveCount(0);
 
     await page.getByRole("button", { name: "写作设置" }).click();
     const settingsDialog = page.locator("#settings-dialog");
@@ -265,21 +263,40 @@ test.describe("smoke regression", () => {
     await settingsDialog.getByRole("button", { name: "关闭写作设置" }).click();
     await expect(settingsDialog).toBeHidden();
 
-    const switchToProMode = page.getByRole("button", { name: "切到工作台模式" });
-    if (await switchToProMode.isVisible()) {
-      await switchToProMode.click();
-    }
-    await expect(page.getByRole("heading", { name: "工作台面板" })).toBeVisible();
+    await page.getByRole("button", { name: "展开进阶面板" }).click();
+    await expect(page.locator(".advanced-panel-stack")).toBeVisible();
+
+    await page.getByRole("button", { name: "写作助手" }).click();
+    await expect(page.locator("#assistant-drawer")).toBeVisible();
+  });
+
+  test("settings keep beginner options primary and hide deprecated wording", async ({ page }) => {
+    await installMockChatApi(page, "smoke-settings");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "写作设置" }).click();
+    const settingsDialog = page.locator("#settings-dialog");
+    await expect(settingsDialog).toBeVisible();
+
+    await expect(settingsDialog.getByRole("tab", { name: "写作" })).toBeVisible();
+    await expect(settingsDialog.getByRole("tab", { name: "AI 模型" })).toBeVisible();
+    await expect(settingsDialog.getByRole("tab", { name: "上下文" })).toBeVisible();
+    await expect(settingsDialog.getByRole("tab", { name: "行为" })).toBeVisible();
+
+    await expect(settingsDialog.getByText("基础写作（推荐）")).toHaveCount(0);
+    await expect(settingsDialog.getByText("AI 高级（谨慎调整）")).toHaveCount(0);
+    await expect(settingsDialog.getByText("Ghost 自动建议")).toHaveCount(0);
   });
 
   test("assistant drawer send flow is not regressed", async ({ page }) => {
     const assistantReply = `smoke-reply-${Date.now()}`;
     await installMockChatApi(page, assistantReply);
     await page.goto("/");
-    await page.getByRole("button", { name: "助手抽屉" }).click();
+    await page.getByRole("button", { name: "写作助手" }).click();
 
     const drawer = page.locator("#assistant-drawer");
-    await expect(drawer).toHaveAttribute("aria-hidden", "false");
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("tab", { name: "对话" }).click();
 
     const composer = drawer.locator(".composer textarea");
     await expect(composer).toBeVisible();
@@ -310,5 +327,15 @@ test.describe("smoke regression", () => {
 
     const latestAssistantMessage = assistantRows.last().locator("pre");
     await expect(latestAssistantMessage).toContainText(assistantReply, { timeout: 45_000 });
+  });
+
+  test("assistant drawer defaults to planning instead of chat-first", async ({ page }) => {
+    await installMockChatApi(page, "smoke-planning-default");
+    await page.goto("/");
+    await page.getByRole("button", { name: "写作助手" }).click();
+
+    const drawer = page.locator("#assistant-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByRole("heading", { name: "结构化大纲与伏笔" })).toBeVisible();
   });
 });

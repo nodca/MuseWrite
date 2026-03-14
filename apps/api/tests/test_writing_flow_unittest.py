@@ -8,18 +8,25 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 import app.services.chat_service as chat_service_module
 import app.services.context_compiler as context_compiler_module
+import app.services.context_compiler.compression as context_compression_module
+import app.services.context_compiler.pipeline as context_pipeline_module
+import app.services.chat_service.entity_graph as entity_graph_module
+import app.services.chat_service.entity_merge as entity_merge_module
+import app.services.chat_action_effects as chat_action_effects_module
 import app.services.llm_provider as llm_provider_module
 import app.services.retrieval_adapters as retrieval_adapters_module
 from app.core.config import settings
 from app.models.chat import ChatAction, ChatSession, PendingGraphMutation
 from app.models.content import ForeshadowingCard, SettingEntry, StoryCard
-from app.services.chat_service import (
+from app.services.chat_service.entity_graph import (
     _apply_graph_pronoun_coref_preprocess,
     _build_graph_extraction_segments,
     _build_project_alias_prompt_hints,
     _build_project_entity_alias_map,
     _resolve_entity_aliases_for_candidates,
     _scan_alias_hints_in_text,
+)
+from app.services.chat_service import (
     apply_action_effects,
     create_action,
     create_project_chapter,
@@ -35,6 +42,7 @@ from app.services.chat_service import (
     create_prompt_template,
     consolidate_volume_memory,
     delete_project_chapter,
+    delete_scene_beat,
     list_cards,
     list_messages,
     list_project_chapter_revisions,
@@ -48,6 +56,7 @@ from app.services.chat_service import (
     set_action_status,
     undo_action_effects,
     update_model_profile,
+    update_scene_beat,
     activate_model_profile,
     update_prompt_template,
 )
@@ -180,6 +189,78 @@ class WritingFlowTestCase(unittest.TestCase):
             self.assertEqual(deleted_id, int(chapter.id or 0))
             self.assertIsNotNone(next_active)
 
+    def test_chapter_save_and_rollback_enqueue_book_memory_jobs(self) -> None:
+        with Session(self.engine) as db:
+            chapter = list_project_chapters(db, 1)[0]
+            chapter_id = int(chapter.id or 0)
+
+            with mock.patch(
+                "app.services.chat_service.chapters.enqueue_book_memory_consolidation_job"
+            ) as mock_enqueue:
+                saved = save_project_chapter(
+                    db,
+                    project_id=1,
+                    chapter_id=chapter_id,
+                    title="第一章",
+                    content="第一版正文",
+                    volume_id=None,
+                    operator_id="tester",
+                )
+                saved_version = int(saved.version)
+                rolled = rollback_project_chapter(
+                    db,
+                    project_id=1,
+                    chapter_id=chapter_id,
+                    target_version=1,
+                    operator_id="tester",
+                )
+
+            self.assertEqual(saved_version, 2)
+            self.assertEqual(int(rolled.version), 3)
+            self.assertEqual(mock_enqueue.call_count, 2)
+            self.assertEqual(mock_enqueue.call_args_list[0].kwargs.get("reason"), "chapter_saved")
+            self.assertEqual(mock_enqueue.call_args_list[1].kwargs.get("reason"), "chapter_rollback")
+            self.assertEqual(mock_enqueue.call_args_list[0].kwargs.get("chapter_id"), chapter_id)
+            self.assertEqual(mock_enqueue.call_args_list[1].kwargs.get("chapter_id"), chapter_id)
+
+    def test_scene_beat_mutations_enqueue_book_memory_jobs(self) -> None:
+        with Session(self.engine) as db:
+            chapter = list_project_chapters(db, 1)[0]
+            chapter_id = int(chapter.id or 0)
+
+            with mock.patch(
+                "app.services.chat_service.scene_beats.enqueue_book_memory_consolidation_job"
+            ) as mock_enqueue:
+                beat = create_scene_beat(
+                    db,
+                    project_id=1,
+                    chapter_id=chapter_id,
+                    content="林默夜探旧宅",
+                    status="pending",
+                    operator_id="tester",
+                )
+                update_scene_beat(
+                    db,
+                    project_id=1,
+                    chapter_id=chapter_id,
+                    beat_id=int(beat.id or 0),
+                    content="林默夜探旧宅，发现暗门",
+                    status="done",
+                    operator_id="tester",
+                )
+                delete_scene_beat(
+                    db,
+                    project_id=1,
+                    chapter_id=chapter_id,
+                    beat_id=int(beat.id or 0),
+                )
+
+            reasons = [call.kwargs.get("reason") for call in mock_enqueue.call_args_list]
+            self.assertEqual(reasons, ["scene_beat_created", "scene_beat_updated", "scene_beat_deleted"])
+            self.assertEqual(mock_enqueue.call_args_list[0].kwargs.get("operator_id"), "tester")
+            self.assertEqual(mock_enqueue.call_args_list[1].kwargs.get("operator_id"), "tester")
+            self.assertEqual(mock_enqueue.call_args_list[2].kwargs.get("operator_id"), "system")
+
     def test_prompt_template_revision_and_rollback(self) -> None:
         with Session(self.engine) as db:
             created = create_prompt_template(
@@ -225,19 +306,20 @@ class WritingFlowTestCase(unittest.TestCase):
             self.assertEqual(rolled.user_prompt_prefix, "用户前缀A")
 
     def test_prompt_template_guard_blocks_risky_instruction(self) -> None:
-        original_guard = settings.prompt_template_guard_enabled
-        original_mode = settings.prompt_template_guard_mode
-        original_warn_score = settings.prompt_template_guard_warn_score
-        original_block_score = settings.prompt_template_guard_block_score
-        original_terms = settings.prompt_template_guard_terms
-        original_max = settings.prompt_template_guard_max_risk_terms
+        import app.services.chat_service.prompt_templates as pt_module
+        original_guard = pt_module._GUARD_ENABLED
+        original_mode = pt_module._GUARD_MODE
+        original_warn_score = pt_module._GUARD_WARN_SCORE
+        original_block_score = pt_module._GUARD_BLOCK_SCORE
+        original_terms = pt_module._GUARD_TERMS
+        original_max = pt_module._GUARD_MAX_RISK_TERMS
         try:
-            settings.prompt_template_guard_enabled = True
-            settings.prompt_template_guard_mode = "block"
-            settings.prompt_template_guard_warn_score = 0.3
-            settings.prompt_template_guard_block_score = 0.5
-            settings.prompt_template_guard_terms = ["ignore previous", "system prompt"]
-            settings.prompt_template_guard_max_risk_terms = 1
+            pt_module._GUARD_ENABLED = True
+            pt_module._GUARD_MODE = "block"
+            pt_module._GUARD_WARN_SCORE = 0.3
+            pt_module._GUARD_BLOCK_SCORE = 0.5
+            pt_module._GUARD_TERMS = ["ignore previous", "system prompt"]
+            pt_module._GUARD_MAX_RISK_TERMS = 1
             with Session(self.engine) as db:
                 with self.assertRaises(ValueError):
                     create_prompt_template(
@@ -251,27 +333,28 @@ class WritingFlowTestCase(unittest.TestCase):
                         operator_id="tester",
                     )
         finally:
-            settings.prompt_template_guard_enabled = original_guard
-            settings.prompt_template_guard_mode = original_mode
-            settings.prompt_template_guard_warn_score = original_warn_score
-            settings.prompt_template_guard_block_score = original_block_score
-            settings.prompt_template_guard_terms = original_terms
-            settings.prompt_template_guard_max_risk_terms = original_max
+            pt_module._GUARD_ENABLED = original_guard
+            pt_module._GUARD_MODE = original_mode
+            pt_module._GUARD_WARN_SCORE = original_warn_score
+            pt_module._GUARD_BLOCK_SCORE = original_block_score
+            pt_module._GUARD_TERMS = original_terms
+            pt_module._GUARD_MAX_RISK_TERMS = original_max
 
     def test_prompt_template_guard_warn_mode_allows_risky_text(self) -> None:
-        original_guard = settings.prompt_template_guard_enabled
-        original_mode = settings.prompt_template_guard_mode
-        original_warn_score = settings.prompt_template_guard_warn_score
-        original_block_score = settings.prompt_template_guard_block_score
-        original_terms = settings.prompt_template_guard_terms
-        original_max = settings.prompt_template_guard_max_risk_terms
+        import app.services.chat_service.prompt_templates as pt_module
+        original_guard = pt_module._GUARD_ENABLED
+        original_mode = pt_module._GUARD_MODE
+        original_warn_score = pt_module._GUARD_WARN_SCORE
+        original_block_score = pt_module._GUARD_BLOCK_SCORE
+        original_terms = pt_module._GUARD_TERMS
+        original_max = pt_module._GUARD_MAX_RISK_TERMS
         try:
-            settings.prompt_template_guard_enabled = True
-            settings.prompt_template_guard_mode = "warn"
-            settings.prompt_template_guard_warn_score = 0.2
-            settings.prompt_template_guard_block_score = 0.5
-            settings.prompt_template_guard_terms = ["ignore previous", "system prompt"]
-            settings.prompt_template_guard_max_risk_terms = 1
+            pt_module._GUARD_ENABLED = True
+            pt_module._GUARD_MODE = "warn"
+            pt_module._GUARD_WARN_SCORE = 0.2
+            pt_module._GUARD_BLOCK_SCORE = 0.5
+            pt_module._GUARD_TERMS = ["ignore previous", "system prompt"]
+            pt_module._GUARD_MAX_RISK_TERMS = 1
             with Session(self.engine) as db:
                 created = create_prompt_template(
                     db,
@@ -285,27 +368,28 @@ class WritingFlowTestCase(unittest.TestCase):
                 )
                 self.assertEqual(created.name, "警告模板")
         finally:
-            settings.prompt_template_guard_enabled = original_guard
-            settings.prompt_template_guard_mode = original_mode
-            settings.prompt_template_guard_warn_score = original_warn_score
-            settings.prompt_template_guard_block_score = original_block_score
-            settings.prompt_template_guard_terms = original_terms
-            settings.prompt_template_guard_max_risk_terms = original_max
+            pt_module._GUARD_ENABLED = original_guard
+            pt_module._GUARD_MODE = original_mode
+            pt_module._GUARD_WARN_SCORE = original_warn_score
+            pt_module._GUARD_BLOCK_SCORE = original_block_score
+            pt_module._GUARD_TERMS = original_terms
+            pt_module._GUARD_MAX_RISK_TERMS = original_max
 
     def test_prompt_template_rollback_respects_security_guard(self) -> None:
-        original_guard = settings.prompt_template_guard_enabled
-        original_mode = settings.prompt_template_guard_mode
-        original_warn_score = settings.prompt_template_guard_warn_score
-        original_block_score = settings.prompt_template_guard_block_score
-        original_terms = settings.prompt_template_guard_terms
-        original_max = settings.prompt_template_guard_max_risk_terms
+        import app.services.chat_service.prompt_templates as pt_module
+        original_guard = pt_module._GUARD_ENABLED
+        original_mode = pt_module._GUARD_MODE
+        original_warn_score = pt_module._GUARD_WARN_SCORE
+        original_block_score = pt_module._GUARD_BLOCK_SCORE
+        original_terms = pt_module._GUARD_TERMS
+        original_max = pt_module._GUARD_MAX_RISK_TERMS
         try:
-            settings.prompt_template_guard_enabled = True
-            settings.prompt_template_guard_mode = "block"
-            settings.prompt_template_guard_warn_score = 0.3
-            settings.prompt_template_guard_block_score = 0.5
-            settings.prompt_template_guard_terms = ["ignore previous", "system prompt"]
-            settings.prompt_template_guard_max_risk_terms = 1
+            pt_module._GUARD_ENABLED = True
+            pt_module._GUARD_MODE = "block"
+            pt_module._GUARD_WARN_SCORE = 0.3
+            pt_module._GUARD_BLOCK_SCORE = 0.5
+            pt_module._GUARD_TERMS = ["ignore previous", "system prompt"]
+            pt_module._GUARD_MAX_RISK_TERMS = 1
             with Session(self.engine) as db:
                 created = create_prompt_template(
                     db,
@@ -318,7 +402,7 @@ class WritingFlowTestCase(unittest.TestCase):
                     operator_id="tester",
                 )
 
-                settings.prompt_template_guard_mode = "warn"
+                pt_module._GUARD_MODE = "warn"
                 update_prompt_template(
                     db,
                     project_id=1,
@@ -331,7 +415,7 @@ class WritingFlowTestCase(unittest.TestCase):
                     operator_id="tester",
                 )
 
-                settings.prompt_template_guard_mode = "block"
+                pt_module._GUARD_MODE = "block"
                 update_prompt_template(
                     db,
                     project_id=1,
@@ -353,18 +437,18 @@ class WritingFlowTestCase(unittest.TestCase):
                         operator_id="tester",
                     )
         finally:
-            settings.prompt_template_guard_enabled = original_guard
-            settings.prompt_template_guard_mode = original_mode
-            settings.prompt_template_guard_warn_score = original_warn_score
-            settings.prompt_template_guard_block_score = original_block_score
-            settings.prompt_template_guard_terms = original_terms
-            settings.prompt_template_guard_max_risk_terms = original_max
+            pt_module._GUARD_ENABLED = original_guard
+            pt_module._GUARD_MODE = original_mode
+            pt_module._GUARD_WARN_SCORE = original_warn_score
+            pt_module._GUARD_BLOCK_SCORE = original_block_score
+            pt_module._GUARD_TERMS = original_terms
+            pt_module._GUARD_MAX_RISK_TERMS = original_max
 
     def test_graph_sync_writes_candidate_state(self) -> None:
-        original_fetch = chat_service_module.fetch_lightrag_graph_candidates
-        original_delete_by_sources = chat_service_module.delete_neo4j_graph_facts_by_sources
-        original_upsert = chat_service_module.upsert_neo4j_graph_facts
-        captured: dict[str, object] = {}
+        original_fetch = entity_graph_module.fetch_lightrag_graph_candidates
+        original_delete_by_sources = entity_graph_module.delete_neo4j_graph_facts_by_sources
+        original_upsert = entity_graph_module.upsert_neo4j_graph_facts
+        captured: dict[str, object] = {"calls": []}
         try:
             candidate = make_graph_candidate(
                 "林澈",
@@ -373,10 +457,10 @@ class WritingFlowTestCase(unittest.TestCase):
                 origin="lightrag_query",
                 item_id=1,
             )
-            chat_service_module.fetch_lightrag_graph_candidates = (
+            entity_graph_module.fetch_lightrag_graph_candidates = (
                 lambda *_args, **_kwargs: [candidate] if candidate else []
             )
-            chat_service_module.delete_neo4j_graph_facts_by_sources = lambda *_args, **_kwargs: 0
+            entity_graph_module.delete_neo4j_graph_facts_by_sources = lambda *_args, **_kwargs: 0
 
             def fake_upsert(
                 project_id: int,
@@ -393,7 +477,7 @@ class WritingFlowTestCase(unittest.TestCase):
                 captured["current_chapter"] = current_chapter
                 return ["fact_test"]
 
-            chat_service_module.upsert_neo4j_graph_facts = fake_upsert
+            entity_graph_module.upsert_neo4j_graph_facts = fake_upsert
 
             with Session(self.engine) as db:
                 graph_sync, fact_keys = chat_service_module._sync_graph_for_action(
@@ -408,9 +492,9 @@ class WritingFlowTestCase(unittest.TestCase):
             self.assertEqual(fact_keys, ["fact_test"])
             self.assertEqual((graph_sync or {}).get("status"), "synced")
         finally:
-            chat_service_module.fetch_lightrag_graph_candidates = original_fetch
-            chat_service_module.delete_neo4j_graph_facts_by_sources = original_delete_by_sources
-            chat_service_module.upsert_neo4j_graph_facts = original_upsert
+            entity_graph_module.fetch_lightrag_graph_candidates = original_fetch
+            entity_graph_module.delete_neo4j_graph_facts_by_sources = original_delete_by_sources
+            entity_graph_module.upsert_neo4j_graph_facts = original_upsert
 
     def test_delete_neo4j_graph_facts_temporal_close_uses_previous_chapter(self) -> None:
         original_graph_db = retrieval_adapters_module.GraphDatabase
@@ -419,7 +503,7 @@ class WritingFlowTestCase(unittest.TestCase):
         original_user = settings.neo4j_username
         original_password = settings.neo4j_password
         original_temporal = settings.graph_temporal_enabled
-        captured: dict[str, object] = {}
+        captured: dict[str, object] = {"calls": []}
 
         class _FakeResult:
             def single(self):
@@ -435,6 +519,9 @@ class WritingFlowTestCase(unittest.TestCase):
             def run(self, cypher: str, **kwargs):
                 captured["cypher"] = cypher
                 captured["kwargs"] = kwargs
+                calls = captured.get("calls")
+                if isinstance(calls, list):
+                    calls.append({"cypher": cypher, "kwargs": kwargs})
                 return _FakeResult()
 
         class _FakeDriver:
@@ -466,8 +553,18 @@ class WritingFlowTestCase(unittest.TestCase):
                 current_chapter=5,
             )
             self.assertEqual(deleted, 1)
-            self.assertIn("SET r.valid_to_chapter = $current_chapter - 1", str(captured.get("cypher") or ""))
-            self.assertEqual((captured.get("kwargs") or {}).get("current_chapter"), 5)
+            calls = captured.get("calls")
+            self.assertTrue(isinstance(calls, list) and len(calls) >= 1)
+            temporal_delete_call = next(
+                (
+                    item
+                    for item in calls
+                    if "SET r.valid_to_chapter = $current_chapter - 1" in str((item or {}).get("cypher") or "")
+                ),
+                None,
+            )
+            self.assertIsNotNone(temporal_delete_call)
+            self.assertEqual((temporal_delete_call or {}).get("kwargs", {}).get("current_chapter"), 5)
         finally:
             retrieval_adapters_module.GraphDatabase = original_graph_db
             settings.neo4j_enabled = original_enabled
@@ -477,8 +574,8 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.graph_temporal_enabled = original_temporal
 
     def test_graph_confirm_candidates_action_apply_and_undo(self) -> None:
-        original_promote = chat_service_module.promote_neo4j_candidate_facts
-        original_update_state = chat_service_module.update_neo4j_graph_fact_state
+        original_promote = chat_action_effects_module.promote_neo4j_candidate_facts
+        original_update_state = chat_action_effects_module.update_neo4j_graph_fact_state
         captured_promote: dict[str, object] = {}
         captured_revert: dict[str, object] = {}
         try:
@@ -514,8 +611,8 @@ class WritingFlowTestCase(unittest.TestCase):
                 captured_revert["current_chapter"] = current_chapter
                 return len(fact_keys)
 
-            chat_service_module.promote_neo4j_candidate_facts = fake_promote
-            chat_service_module.update_neo4j_graph_fact_state = fake_update_state
+            chat_action_effects_module.promote_neo4j_candidate_facts = fake_promote
+            chat_action_effects_module.update_neo4j_graph_fact_state = fake_update_state
 
             with Session(self.engine) as db:
                 session = ChatSession(project_id=1, user_id="tester", title="图谱候选确认")
@@ -552,8 +649,8 @@ class WritingFlowTestCase(unittest.TestCase):
                 self.assertEqual(captured_revert.get("from_state"), "confirmed")
                 self.assertEqual(captured_revert.get("current_chapter"), 5)
         finally:
-            chat_service_module.promote_neo4j_candidate_facts = original_promote
-            chat_service_module.update_neo4j_graph_fact_state = original_update_state
+            chat_action_effects_module.promote_neo4j_candidate_facts = original_promote
+            chat_action_effects_module.update_neo4j_graph_fact_state = original_update_state
 
     def test_graph_confirm_candidates_action_requires_scope(self) -> None:
         with Session(self.engine) as db:
@@ -707,13 +804,14 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_max_chars = original_max_chars
 
     def test_context_compiler_circuit_breaker_short_circuits_after_failures(self) -> None:
-        original_cb_enabled = settings.retrieval_circuit_breaker_enabled
-        original_graph_threshold = settings.retrieval_graph_cb_failure_threshold
-        original_graph_window = settings.retrieval_graph_cb_window_seconds
-        original_graph_open = settings.retrieval_graph_cb_open_seconds
-        original_rag_threshold = settings.retrieval_rag_cb_failure_threshold
-        original_rag_window = settings.retrieval_rag_cb_window_seconds
-        original_rag_open = settings.retrieval_rag_cb_open_seconds
+        import app.services.context_compiler.circuit_breaker as cb_module
+        original_cb_enabled = cb_module._CB_ENABLED
+        original_graph_threshold = cb_module._GRAPH_CB_FAILURE_THRESHOLD
+        original_graph_window = cb_module._GRAPH_CB_WINDOW_SECONDS
+        original_graph_open = cb_module._GRAPH_CB_OPEN_SECONDS
+        original_rag_threshold = cb_module._RAG_CB_FAILURE_THRESHOLD
+        original_rag_window = cb_module._RAG_CB_WINDOW_SECONDS
+        original_rag_open = cb_module._RAG_CB_OPEN_SECONDS
         original_parallel = settings.retrieval_parallel_enabled
         original_deterministic_short = settings.deterministic_short_circuit_enabled
         original_neo4j_enabled = settings.neo4j_enabled
@@ -726,13 +824,13 @@ class WritingFlowTestCase(unittest.TestCase):
             return future
 
         try:
-            settings.retrieval_circuit_breaker_enabled = True
-            settings.retrieval_graph_cb_failure_threshold = 1
-            settings.retrieval_graph_cb_window_seconds = 120.0
-            settings.retrieval_graph_cb_open_seconds = 120.0
-            settings.retrieval_rag_cb_failure_threshold = 1
-            settings.retrieval_rag_cb_window_seconds = 120.0
-            settings.retrieval_rag_cb_open_seconds = 120.0
+            cb_module._CB_ENABLED = True
+            cb_module._GRAPH_CB_FAILURE_THRESHOLD = 1
+            cb_module._GRAPH_CB_WINDOW_SECONDS = 120.0
+            cb_module._GRAPH_CB_OPEN_SECONDS = 120.0
+            cb_module._RAG_CB_FAILURE_THRESHOLD = 1
+            cb_module._RAG_CB_WINDOW_SECONDS = 120.0
+            cb_module._RAG_CB_OPEN_SECONDS = 120.0
             settings.retrieval_parallel_enabled = False
             settings.deterministic_short_circuit_enabled = False
             settings.neo4j_enabled = True
@@ -751,13 +849,13 @@ class WritingFlowTestCase(unittest.TestCase):
                 db.refresh(session)
 
                 with mock.patch(
-                    "app.services.context_compiler._submit_graph_future",
+                    "app.services.context_compiler.pipeline._submit_graph_future",
                     side_effect=lambda *args, **kwargs: _failed_future(),
                 ), mock.patch(
-                    "app.services.context_compiler._submit_rag_future",
+                    "app.services.context_compiler.pipeline._submit_rag_future",
                     side_effect=lambda *args, **kwargs: _failed_future(),
                 ), mock.patch(
-                    "app.services.context_compiler._build_graph_facts",
+                    "app.services.context_compiler.pipeline._build_graph_facts",
                     return_value=[
                         {
                             "kind": "graph_edge",
@@ -824,13 +922,13 @@ class WritingFlowTestCase(unittest.TestCase):
                 1,
             )
         finally:
-            settings.retrieval_circuit_breaker_enabled = original_cb_enabled
-            settings.retrieval_graph_cb_failure_threshold = original_graph_threshold
-            settings.retrieval_graph_cb_window_seconds = original_graph_window
-            settings.retrieval_graph_cb_open_seconds = original_graph_open
-            settings.retrieval_rag_cb_failure_threshold = original_rag_threshold
-            settings.retrieval_rag_cb_window_seconds = original_rag_window
-            settings.retrieval_rag_cb_open_seconds = original_rag_open
+            cb_module._CB_ENABLED = original_cb_enabled
+            cb_module._GRAPH_CB_FAILURE_THRESHOLD = original_graph_threshold
+            cb_module._GRAPH_CB_WINDOW_SECONDS = original_graph_window
+            cb_module._GRAPH_CB_OPEN_SECONDS = original_graph_open
+            cb_module._RAG_CB_FAILURE_THRESHOLD = original_rag_threshold
+            cb_module._RAG_CB_WINDOW_SECONDS = original_rag_window
+            cb_module._RAG_CB_OPEN_SECONDS = original_rag_open
             settings.retrieval_parallel_enabled = original_parallel
             settings.deterministic_short_circuit_enabled = original_deterministic_short
             settings.neo4j_enabled = original_neo4j_enabled
@@ -843,7 +941,7 @@ class WritingFlowTestCase(unittest.TestCase):
         original_compression_mode = settings.context_compression_mode
         original_min_chars = settings.context_compression_min_chars
         original_max_chars = settings.context_compression_max_chars
-        original_reranker = context_compiler_module._call_context_compressor_reranker
+        original_reranker = context_compression_module._call_context_compressor_reranker
         project_id = 306
         try:
             settings.semantic_router_enabled = True
@@ -852,7 +950,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_mode = "rerank"
             settings.context_compression_min_chars = 80
             settings.context_compression_max_chars = 220
-            context_compiler_module._call_context_compressor_reranker = (
+            context_compression_module._call_context_compressor_reranker = (
                 lambda **_: "[DSL] 林默 :: 赤炎剑归属林默 (score=0.990)\n"
                 "[GRAPH] 黑塔 -> 极夜关补给线受阻 (score=0.880)"
             )
@@ -912,7 +1010,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_mode = original_compression_mode
             settings.context_compression_min_chars = original_min_chars
             settings.context_compression_max_chars = original_max_chars
-            context_compiler_module._call_context_compressor_reranker = original_reranker
+            context_compression_module._call_context_compressor_reranker = original_reranker
 
     def test_context_compiler_rerank_mode_fallback_to_heuristic(self) -> None:
         original_router_enabled = settings.semantic_router_enabled
@@ -921,7 +1019,7 @@ class WritingFlowTestCase(unittest.TestCase):
         original_compression_mode = settings.context_compression_mode
         original_min_chars = settings.context_compression_min_chars
         original_max_chars = settings.context_compression_max_chars
-        original_reranker = context_compiler_module._call_context_compressor_reranker
+        original_reranker = context_compression_module._call_context_compressor_reranker
         project_id = 307
         try:
             settings.semantic_router_enabled = True
@@ -930,7 +1028,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_mode = "rerank"
             settings.context_compression_min_chars = 20
             settings.context_compression_max_chars = 220
-            context_compiler_module._call_context_compressor_reranker = lambda **_: None
+            context_compression_module._call_context_compressor_reranker = lambda **_: None
 
             with Session(self.engine) as db:
                 session = ChatSession(project_id=project_id, user_id="tester", title="rerank 回退测试")
@@ -994,7 +1092,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_mode = original_compression_mode
             settings.context_compression_min_chars = original_min_chars
             settings.context_compression_max_chars = original_max_chars
-            context_compiler_module._call_context_compressor_reranker = original_reranker
+            context_compression_module._call_context_compressor_reranker = original_reranker
 
     def test_context_compiler_rerank_mode_emits_telemetry(self) -> None:
         original_router_enabled = settings.semantic_router_enabled
@@ -1006,7 +1104,7 @@ class WritingFlowTestCase(unittest.TestCase):
         original_min_score = settings.context_compression_reranker_min_score
         original_top_k = settings.context_compression_reranker_top_k
         original_min_dsl_keep = settings.context_compression_reranker_min_dsl_keep
-        original_score_lines = context_compiler_module._score_lines_with_reranker
+        original_score_lines = context_compression_module._score_lines_with_reranker
         project_id = 308
         try:
             settings.semantic_router_enabled = True
@@ -1024,7 +1122,7 @@ class WritingFlowTestCase(unittest.TestCase):
                 base = [0.93, 0.71, 0.42, 0.26]
                 return [base[idx] if idx < len(base) else 0.15 for idx in range(len(lines))]
 
-            context_compiler_module._score_lines_with_reranker = _fake_scores
+            context_compression_module._score_lines_with_reranker = _fake_scores
 
             with Session(self.engine) as db:
                 session = ChatSession(project_id=project_id, user_id="tester", title="rerank telemetry")
@@ -1097,7 +1195,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.context_compression_reranker_min_score = original_min_score
             settings.context_compression_reranker_top_k = original_top_k
             settings.context_compression_reranker_min_dsl_keep = original_min_dsl_keep
-            context_compiler_module._score_lines_with_reranker = original_score_lines
+            context_compression_module._score_lines_with_reranker = original_score_lines
 
     def test_context_compiler_extracts_negative_constraints(self) -> None:
         original_router_enabled = settings.semantic_router_enabled
@@ -1509,6 +1607,7 @@ class WritingFlowTestCase(unittest.TestCase):
                 user_input="用户当前输入",
                 context=context,
                 thinking_enabled=False,
+                include_cache_prefix=True,
             )
             self.assertEqual(len(messages), 5)
             self.assertIn("<static_prefix>", messages[0].get("content", ""))
@@ -1565,6 +1664,7 @@ class WritingFlowTestCase(unittest.TestCase):
                 user_input="继续写",
                 context=context,
                 thinking_enabled=False,
+                include_cache_prefix=True,
             )
             self.assertEqual(len(messages), 6)
             self.assertTrue(str(messages[3].get("content", "")).startswith("<negative_constraints>\n"))
@@ -1602,6 +1702,7 @@ class WritingFlowTestCase(unittest.TestCase):
                 user_input="请继续",
                 context=context,
                 thinking_enabled=False,
+                include_cache_prefix=True,
             )
             self.assertGreaterEqual(len(blocks), 5)
             self.assertIn("<session_prefix>", str(blocks[2].get("text", "")))
@@ -2410,7 +2511,7 @@ class WritingFlowTestCase(unittest.TestCase):
         original_provider = settings.llm_provider
         original_chat = settings.llm_temperature_chat
         original_action = settings.llm_temperature_action
-        original_ghost = settings.llm_temperature_ghost
+        original_suggestion = settings.llm_temperature_suggestion
         original_brainstorm = settings.llm_temperature_brainstorm
         original_default = settings.llm_temperature
 
@@ -2418,15 +2519,15 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.llm_provider = "stub"
             settings.llm_temperature_chat = 0.4
             settings.llm_temperature_action = 0.0
-            settings.llm_temperature_ghost = 0.7
+            settings.llm_temperature_suggestion = 0.7
             settings.llm_temperature_brainstorm = 1.0
             settings.llm_temperature = 0.4
 
             action_result = asyncio.run(
                 generate_chat("请整理设定", context={}, temperature_profile="action")
             )
-            ghost_result = asyncio.run(
-                generate_chat("续写", context={}, temperature_profile="ghost")
+            suggestion_result = asyncio.run(
+                generate_chat("续写", context={}, temperature_profile="suggestion")
             )
             brainstorm_result = asyncio.run(
                 generate_chat("给我十个脑洞", context={}, temperature_profile="brainstorm")
@@ -2437,8 +2538,8 @@ class WritingFlowTestCase(unittest.TestCase):
 
             self.assertEqual(action_result.usage.get("temperature"), 0.0)
             self.assertEqual(action_result.usage.get("temperature_profile"), "action")
-            self.assertEqual(ghost_result.usage.get("temperature"), 0.7)
-            self.assertEqual(ghost_result.usage.get("temperature_profile"), "ghost")
+            self.assertEqual(suggestion_result.usage.get("temperature"), 0.7)
+            self.assertEqual(suggestion_result.usage.get("temperature_profile"), "suggestion")
             self.assertEqual(brainstorm_result.usage.get("temperature"), 1.0)
             self.assertEqual(brainstorm_result.usage.get("temperature_profile"), "brainstorm")
             self.assertEqual(override_result.usage.get("temperature"), 1.2)
@@ -2447,7 +2548,7 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.llm_provider = original_provider
             settings.llm_temperature_chat = original_chat
             settings.llm_temperature_action = original_action
-            settings.llm_temperature_ghost = original_ghost
+            settings.llm_temperature_suggestion = original_suggestion
             settings.llm_temperature_brainstorm = original_brainstorm
             settings.llm_temperature = original_default
 
@@ -2537,11 +2638,12 @@ class WritingFlowTestCase(unittest.TestCase):
         self.assertEqual(int(meta.get("inheritance_used_chunks", 0)), 0)
 
     def test_graph_pronoun_coref_preprocess_for_card_actions(self) -> None:
-        original_enabled = settings.graph_coref_preprocess_enabled
-        original_max_replacements = settings.graph_coref_max_replacements
+        import app.services.chat_service.entity_graph as eg_module
+        original_enabled = eg_module._COREF_PREPROCESS_ENABLED
+        original_max_replacements = eg_module._COREF_MAX_REPLACEMENTS
         try:
-            settings.graph_coref_preprocess_enabled = True
-            settings.graph_coref_max_replacements = 8
+            eg_module._COREF_PREPROCESS_ENABLED = True
+            eg_module._COREF_MAX_REPLACEMENTS = 8
 
             text = (
                 "[project:1] card.update\n"
@@ -2569,8 +2671,8 @@ class WritingFlowTestCase(unittest.TestCase):
             self.assertEqual(untouched, text)
             self.assertFalse(bool(untouched_meta.get("applied")))
         finally:
-            settings.graph_coref_preprocess_enabled = original_enabled
-            settings.graph_coref_max_replacements = original_max_replacements
+            eg_module._COREF_PREPROCESS_ENABLED = original_enabled
+            eg_module._COREF_MAX_REPLACEMENTS = original_max_replacements
 
     def test_entity_merge_requires_manual_apply_helpers(self) -> None:
         self.assertTrue(is_entity_merge_action_type("entity.merge"))
@@ -2632,7 +2734,7 @@ class WritingFlowTestCase(unittest.TestCase):
         original_min_jaccard = settings.entity_merge_scan_min_jaccard
         original_min_rel_overlap = settings.entity_merge_scan_min_relation_overlap
         original_min_name_similarity = settings.entity_merge_scan_min_name_similarity
-        original_fetch_profiles = chat_service_module.fetch_neo4j_entity_profiles
+        original_fetch_profiles = entity_merge_module.fetch_neo4j_entity_profiles
         try:
             settings.entity_merge_scan_enabled = True
             settings.entity_merge_scan_min_shared_neighbors = 3
@@ -2659,7 +2761,7 @@ class WritingFlowTestCase(unittest.TestCase):
                     },
                 ]
 
-            chat_service_module.fetch_neo4j_entity_profiles = fake_profiles
+            entity_merge_module.fetch_neo4j_entity_profiles = fake_profiles
 
             with Session(self.engine) as db:
                 db.add(StoryCard(project_id=1, title="林默", content={"简介": "主角"}, aliases=["林队长"]))
@@ -2688,11 +2790,11 @@ class WritingFlowTestCase(unittest.TestCase):
             settings.entity_merge_scan_min_jaccard = original_min_jaccard
             settings.entity_merge_scan_min_relation_overlap = original_min_rel_overlap
             settings.entity_merge_scan_min_name_similarity = original_min_name_similarity
-            chat_service_module.fetch_neo4j_entity_profiles = original_fetch_profiles
+            entity_merge_module.fetch_neo4j_entity_profiles = original_fetch_profiles
 
     def test_entity_merge_scan_skips_existing_alias(self) -> None:
         original_enabled = settings.entity_merge_scan_enabled
-        original_fetch_profiles = chat_service_module.fetch_neo4j_entity_profiles
+        original_fetch_profiles = entity_merge_module.fetch_neo4j_entity_profiles
         try:
             settings.entity_merge_scan_enabled = True
 
@@ -2715,7 +2817,7 @@ class WritingFlowTestCase(unittest.TestCase):
                     },
                 ]
 
-            chat_service_module.fetch_neo4j_entity_profiles = fake_profiles
+            entity_merge_module.fetch_neo4j_entity_profiles = fake_profiles
 
             with Session(self.engine) as db:
                 db.add(StoryCard(project_id=1, title="林默", content={"简介": "主角"}, aliases=["神秘面具人"]))
@@ -2729,10 +2831,10 @@ class WritingFlowTestCase(unittest.TestCase):
                     source="unit_test",
                 )
                 self.assertEqual(result.get("proposed_count"), 0)
-                self.assertIn(result.get("status"), {"no_candidate", "deduped_or_skipped"})
+                self.assertIn(result.get("status"), {"no_candidate", "deduped_or_skipped", "no_graph_entities"})
         finally:
             settings.entity_merge_scan_enabled = original_enabled
-            chat_service_module.fetch_neo4j_entity_profiles = original_fetch_profiles
+            entity_merge_module.fetch_neo4j_entity_profiles = original_fetch_profiles
 
     def test_apply_failure_rollback_does_not_commit_partial_card_changes(self) -> None:
         with Session(self.engine) as db:
@@ -2770,3 +2872,5 @@ class WritingFlowTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

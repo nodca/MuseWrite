@@ -6,8 +6,10 @@ from app.core.config import settings
 from app.models.chat import AsyncJob
 from app.services.base_queue import BaseQueue
 
+_QUEUE = "entity_merge_scan_jobs"
+
 def _queue_name() -> str:
-    return settings.entity_merge_scan_queue_name.strip()
+    return _QUEUE
 
 
 _ENTITY_MERGE_SCAN_QUEUE = BaseQueue(

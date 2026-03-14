@@ -257,7 +257,7 @@ def normalize_index_lifecycle_dead_letter_row(
     }
 
 
-def build_ghost_user_input(
+def build_rewrite_user_input(
     mode: str,
     *,
     source_text: str = "",
@@ -307,10 +307,10 @@ def build_ghost_user_input(
             f"### Context:\n原文：\n{compact_source}"
         )
 
-    raise ValueError(f"unsupported ghost rewrite mode: {normalized_mode}")
+    raise ValueError(f"unsupported rewrite mode: {normalized_mode}")
 
 
-def normalize_ghost_suggestion(value: str, *, max_length: int = 200) -> str:
+def normalize_generated_text(value: str, *, max_length: int = 200) -> str:
     text = (value or "").strip()
     if not text:
         return ""
@@ -511,3 +511,5 @@ def replay_dead_letters(
         "requeue_failed": requeue_failed,
         "skipped_invalid": skipped_invalid,
     }
+
+

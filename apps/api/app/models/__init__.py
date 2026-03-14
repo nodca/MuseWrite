@@ -25,6 +25,14 @@ from app.models.content import (
     SettingEntry,
     StoryCard,
 )
+from app.models.book_memory import (
+    CharacterKnowledgeState,
+    CharacterProfile,
+    MemoryMaterialization,
+    StoryEpisode,
+    StoryStateSnapshot,
+    WorldRule,
+)
 
 __all__ = [
     "ChatSession",
@@ -43,6 +51,12 @@ __all__ = [
     "ForeshadowingCard",
     "PromptTemplate",
     "PromptTemplateRevision",
+    "WorldRule",
+    "CharacterProfile",
+    "StoryStateSnapshot",
+    "StoryEpisode",
+    "CharacterKnowledgeState",
+    "MemoryMaterialization",
     "SimulationSession",
     "SimulationSessionState",
     "SimulationEvent",

@@ -1,4 +1,5 @@
 import { memo } from "react";
+import clsx from "clsx";
 
 import type { ForeshadowingCard, ProjectVolume, SceneBeat } from "../types";
 
@@ -32,6 +33,12 @@ export type StoryPlanningPanelProps = {
   busy: boolean;
 };
 
+const inputClass =
+  "w-full rounded-md border border-border-default bg-surface-primary px-3 py-2 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-primary/30 disabled:opacity-40";
+
+const btnGhostTiny =
+  "rounded-md border border-border-default px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-elevated disabled:opacity-40 transition-colors";
+
 export const StoryPlanningPanel = memo(function StoryPlanningPanel({
   activeChapterId,
   volumes,
@@ -62,19 +69,20 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
   busy,
 }: StoryPlanningPanelProps) {
   return (
-    <section className="panel planning-panel">
-      <div className="panel-title">
+    <section className="space-y-4 p-4">
+      <div className="flex items-center justify-between mb-3">
         <h2>结构化大纲与伏笔</h2>
         <small>Volume / Scene Beat / Foreshadow</small>
       </div>
-      <div className="planning-grid">
-        <article className="planning-card">
-          <div className="panel-title sub">
+      <div className="grid gap-4 md:grid-cols-3">
+        <article className="rounded-lg border border-border-default bg-surface-primary p-4 space-y-3">
+          <div className="flex items-center justify-between mb-2">
             <h3>卷纲</h3>
             <small>{activeVolumeId ? `卷 #${activeVolumeId}` : "未绑定"}</small>
           </div>
-          <div className="planning-row">
+          <div className="flex items-center gap-2">
             <select
+              className={inputClass}
               value={activeVolumeId ?? ""}
               onChange={(event) => {
                 const nextId = Number(event.target.value || 0);
@@ -93,35 +101,39 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
                 </option>
               ))}
             </select>
-            <button className="btn ghost tiny" onClick={() => void onCreateVolume()} disabled={busy}>
+            <button className={btnGhostTiny} onClick={() => void onCreateVolume()} disabled={busy}>
               新建卷
             </button>
           </div>
           <textarea
+            className={inputClass}
             rows={4}
             value={volumeOutlineDraft}
             onChange={(event) => setVolumeOutlineDraft(event.target.value)}
             placeholder="卷纲：本卷核心冲突、推进目标与收束点。"
             disabled={busy || !activeVolumeId}
           />
-          <div className="planning-row">
-            <button className="btn ghost tiny" onClick={() => void onSaveVolumeOutline()} disabled={busy || !activeVolumeId}>
+          <div className="flex items-center gap-2">
+            <button className={btnGhostTiny} onClick={() => void onSaveVolumeOutline()} disabled={busy || !activeVolumeId}>
               保存卷纲
             </button>
           </div>
         </article>
 
-        <article className="planning-card">
-          <div className="panel-title sub">
+        <article className="rounded-lg border border-border-default bg-surface-primary p-4 space-y-3">
+          <div className="flex items-center justify-between mb-2">
             <h3>Scene Beats</h3>
             <small>{sceneBeats.length} 条</small>
           </div>
-          <div className="scene-beat-list">
-            {sceneBeats.length === 0 ? <p className="empty">当前章节还没有 Beat</p> : null}
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {sceneBeats.length === 0 ? <p className="text-sm text-text-tertiary italic">当前章节还没有 Beat</p> : null}
             {sceneBeats.map((beat) => (
               <article
                 key={beat.id}
-                className={`scene-beat-item ${beat.id === activeSceneBeatId ? "active" : ""}`}
+                className={clsx(
+                  "rounded-md border border-border-default p-3 cursor-pointer hover:bg-surface-elevated transition-colors",
+                  beat.id === activeSceneBeatId && "ring-2 ring-accent-primary/30",
+                )}
                 role="button"
                 tabIndex={0}
                 aria-pressed={beat.id === activeSceneBeatId}
@@ -137,9 +149,9 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
                   Beat {beat.beat_index} · {beat.status === "done" ? "已完成" : "进行中"}
                 </strong>
                 <p>{beat.content || "（空）"}</p>
-                <div className="action-ops">
+                <div className="flex items-center gap-2 mt-2">
                   <button
-                    className="btn ghost tiny"
+                    className={btnGhostTiny}
                     onClick={(event) => {
                       event.stopPropagation();
                       void onToggleSceneBeatStatus(beat.id, beat.status !== "done");
@@ -149,7 +161,7 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
                     {beat.status === "done" ? "标记进行中" : "标记已完成"}
                   </button>
                   <button
-                    className="btn ghost tiny"
+                    className={btnGhostTiny}
                     onClick={(event) => {
                       event.stopPropagation();
                       void onDeleteSceneBeat(beat.id);
@@ -163,41 +175,42 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
             ))}
           </div>
           <textarea
+            className={inputClass}
             rows={3}
             value={newBeatContent}
             onChange={(event) => setNewBeatContent(event.target.value)}
             placeholder="新增 Beat：例如「男主发现破绽并留下悬念」"
             disabled={busy || !activeChapterId}
           />
-          <div className="planning-row">
-            <button className="btn ghost tiny" onClick={() => void onCreateSceneBeat()} disabled={busy || !activeChapterId}>
+          <div className="flex items-center gap-2">
+            <button className={btnGhostTiny} onClick={() => void onCreateSceneBeat()} disabled={busy || !activeChapterId}>
               添加 Beat
             </button>
-            <button className="btn ghost tiny" onClick={() => onSelectSceneBeat(null)} disabled={busy}>
+            <button className={btnGhostTiny} onClick={() => onSelectSceneBeat(null)} disabled={busy}>
               不使用 Beat 约束
             </button>
           </div>
         </article>
 
-        <article className="planning-card">
-          <div className="panel-title sub">
+        <article className="rounded-lg border border-border-default bg-surface-primary p-4 space-y-3">
+          <div className="flex items-center justify-between mb-2">
             <h3>伏笔追踪</h3>
             <small>{foreshadowCards.length} 条</small>
           </div>
           {overdueForeshadowCards.length > 0 ? (
-            <p className="draft-hint warning">提醒：有 {overdueForeshadowCards.length} 条伏笔已超 50 章未收束。</p>
+            <p className="text-sm text-warning font-medium">提醒：有 {overdueForeshadowCards.length} 条伏笔已超 50 章未收束。</p>
           ) : null}
-          <div className="foreshadow-list">
-            {foreshadowCards.length === 0 ? <p className="empty">暂无伏笔卡</p> : null}
+          <div className="space-y-2 max-h-60 overflow-y-auto">
+            {foreshadowCards.length === 0 ? <p className="text-sm text-text-tertiary italic">暂无伏笔卡</p> : null}
             {foreshadowCards.map((item) => (
-              <article key={item.id} className="foreshadow-item">
+              <article key={item.id} className="rounded-md border border-border-default p-3">
                 <strong>
                   {item.title} · {item.status === "resolved" ? "已收束" : "未收束"}
                 </strong>
                 <p>{item.description || "（无描述）"}</p>
-                <div className="action-ops">
+                <div className="flex items-center gap-2 mt-2">
                   <button
-                    className="btn ghost tiny"
+                    className={btnGhostTiny}
                     onClick={() =>
                       void onToggleForeshadowStatus(item, item.status === "resolved" ? "open" : "resolved")
                     }
@@ -205,7 +218,7 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
                   >
                     {item.status === "resolved" ? "改为未收束" : "标记已收束"}
                   </button>
-                  <button className="btn ghost tiny" onClick={() => void onDeleteForeshadowCard(item.id)} disabled={busy}>
+                  <button className={btnGhostTiny} onClick={() => void onDeleteForeshadowCard(item.id)} disabled={busy}>
                     删除
                   </button>
                 </div>
@@ -213,6 +226,7 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
             ))}
           </div>
           <input
+            className={inputClass}
             type="text"
             value={foreshadowDraftTitle}
             onChange={(event) => setForeshadowDraftTitle(event.target.value)}
@@ -220,14 +234,15 @@ export const StoryPlanningPanel = memo(function StoryPlanningPanel({
             disabled={busy}
           />
           <textarea
+            className={inputClass}
             rows={3}
             value={foreshadowDraftDescription}
             onChange={(event) => setForeshadowDraftDescription(event.target.value)}
             placeholder="伏笔描述：埋入信息、预期收束方向。"
             disabled={busy}
           />
-          <div className="planning-row">
-            <button className="btn ghost tiny" onClick={() => void onCreateForeshadowCard()} disabled={busy}>
+          <div className="flex items-center gap-2">
+            <button className={btnGhostTiny} onClick={() => void onCreateForeshadowCard()} disabled={busy}>
               新建伏笔卡
             </button>
           </div>

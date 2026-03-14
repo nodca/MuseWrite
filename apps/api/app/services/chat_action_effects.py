@@ -7,7 +7,19 @@ from sqlmodel import Session, select
 from app.core.config import settings
 from app.models.chat import ChatAction
 from app.models.content import SettingEntry, StoryCard
-import app.services.chat_service as _chat_service
+from app.services.graph_mutation_registry import (
+    upsert_pending_graph_mutation,
+    mark_pending_graph_mutation_status,
+    mark_pending_graph_mutation_canceled,
+)
+from app.services.graph_job_queue import enqueue_graph_sync_job, _QUEUE as _GRAPH_SYNC_QUEUE
+from app.services.index_lifecycle_queue import enqueue_index_lifecycle_job, _QUEUE as _INDEX_LIFECYCLE_QUEUE
+from app.services.index_lifecycle_service import process_index_lifecycle_rebuild
+from app.services.retrieval_adapters import (
+    promote_neo4j_candidate_facts,
+    update_neo4j_graph_fact_state,
+    delete_neo4j_graph_facts,
+)
 from app.services.chat_service import (
     _bump_project_mutation_version,
     _collect_entity_merge_aliases,
@@ -237,7 +249,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
         except Exception:
             raise ValueError("graph.confirm_candidates limit must be integer")
 
-        promoted_fact_keys = _chat_service.promote_neo4j_candidate_facts(
+        promoted_fact_keys = promote_neo4j_candidate_facts(
             project_id,
             fact_keys=fact_keys,
             source_ref=source_ref,
@@ -319,7 +331,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
     db.flush()
 
     if atype in {"setting.upsert", "card.create", "card.update"} and action.id:
-        _chat_service.upsert_pending_graph_mutation(
+        upsert_pending_graph_mutation(
             db,
             project_id=project_id,
             action_id=int(action.id),
@@ -330,7 +342,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
 
     if atype in {"setting.upsert", "card.create", "card.update"}:
         if settings.graph_sync_async_enabled:
-            queued = _chat_service.enqueue_graph_sync_job(
+            queued = enqueue_graph_sync_job(
                 action.id,
                 project_id=project_id,
                 action_type=atype,
@@ -343,7 +355,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 db=db,
             )
             if queued:
-                _chat_service.mark_pending_graph_mutation_status(
+                mark_pending_graph_mutation_status(
                     db,
                     mutation_id=mutation_id,
                     status="queued",
@@ -353,7 +365,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                     "graph_sync": {
                         "status": "queued",
                         "mode": "async",
-                        "queue": settings.graph_sync_queue_name,
+                        "queue": _GRAPH_SYNC_QUEUE,
                         "mutation_id": mutation_id,
                         "expected_version": mutation_version,
                         "job_idempotency_key": graph_job_idempotency_key,
@@ -368,7 +380,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                     event_type="graph_queued",
                     operator_id=action.operator_id,
                     event_payload={
-                        "queue": settings.graph_sync_queue_name,
+                        "queue": _GRAPH_SYNC_QUEUE,
                         "mode": "async",
                         "mutation_id": mutation_id,
                         "expected_version": mutation_version,
@@ -417,7 +429,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
             )
 
     if atype == "setting.delete" and settings.index_lifecycle_enabled:
-        queued = _chat_service.enqueue_index_lifecycle_job(
+        queued = enqueue_index_lifecycle_job(
             project_id=project_id,
             operator_id=action.operator_id,
             reason="setting_delete",
@@ -435,7 +447,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 "index_lifecycle": {
                     "status": "queued",
                     "mode": "async",
-                    "queue": settings.index_lifecycle_queue_name,
+                    "queue": _INDEX_LIFECYCLE_QUEUE,
                     "reason": "setting_delete",
                     "mutation_id": mutation_id,
                     "expected_version": mutation_version,
@@ -451,7 +463,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 event_type="index_lifecycle_queued",
                 operator_id=action.operator_id,
                 event_payload={
-                    "queue": settings.index_lifecycle_queue_name,
+                    "queue": _INDEX_LIFECYCLE_QUEUE,
                     "mode": "async",
                     "reason": "setting_delete",
                     "mutation_id": mutation_id,
@@ -460,7 +472,7 @@ def apply_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 },
             )
         else:
-            lifecycle_result = _chat_service.process_index_lifecycle_rebuild(
+            lifecycle_result = process_index_lifecycle_rebuild(
                 db=db,
                 project_id=project_id,
                 reason="setting_delete_sync_fallback",
@@ -583,7 +595,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
             else []
         )
         reverted = (
-            _chat_service.update_neo4j_graph_fact_state(
+            update_neo4j_graph_fact_state(
                 project_id,
                 promoted_fact_keys,
                 to_state="candidate",
@@ -618,7 +630,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
     graph_sync_meta = base_apply_result.get("graph_sync")
     graph_sync_mutation_id = str(graph_sync_meta.get("mutation_id") or "") if isinstance(graph_sync_meta, dict) else ""
     if graph_sync_mutation_id:
-        _chat_service.mark_pending_graph_mutation_canceled(
+        mark_pending_graph_mutation_canceled(
             db,
             mutation_id=graph_sync_mutation_id,
             cancel_reason="undo_requested",
@@ -658,7 +670,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
         else None
     )
     if graph_fact_keys:
-        deleted = _chat_service.delete_neo4j_graph_facts(
+        deleted = delete_neo4j_graph_facts(
             project_id,
             graph_fact_keys,
             current_chapter=undo_chapter_index if undo_chapter_index > 0 else None,
@@ -703,7 +715,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
     db.flush()
 
     if lifecycle_compensation_needed:
-        queued = _chat_service.enqueue_index_lifecycle_job(
+        queued = enqueue_index_lifecycle_job(
             project_id=project_id,
             operator_id=action.operator_id,
             reason="undo_setting_delete",
@@ -721,7 +733,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 "index_lifecycle_compensation": {
                     "status": "queued",
                     "mode": "async",
-                    "queue": settings.index_lifecycle_queue_name,
+                    "queue": _INDEX_LIFECYCLE_QUEUE,
                     "reason": "undo_setting_delete",
                     "mutation_id": compensation_mutation_id,
                     "expected_version": compensation_version,
@@ -737,7 +749,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 event_type="index_lifecycle_queued",
                 operator_id=action.operator_id,
                 event_payload={
-                    "queue": settings.index_lifecycle_queue_name,
+                    "queue": _INDEX_LIFECYCLE_QUEUE,
                     "mode": "async",
                     "reason": "undo_setting_delete",
                     "mutation_id": compensation_mutation_id,
@@ -746,7 +758,7 @@ def undo_action_effects(db: Session, action: ChatAction) -> ChatAction:
                 },
             )
         else:
-            lifecycle_result = _chat_service.process_index_lifecycle_rebuild(
+            lifecycle_result = process_index_lifecycle_rebuild(
                 db=db,
                 project_id=project_id,
                 reason="undo_setting_delete_sync_fallback",

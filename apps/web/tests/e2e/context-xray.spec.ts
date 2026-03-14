@@ -311,9 +311,9 @@ async function installMockChatApi(page: Page): Promise<void> {
 
 async function openAssistantDrawer(page: Page): Promise<Locator> {
   await page.goto("/");
-  await page.getByRole("button", { name: "助手抽屉" }).click();
+  await page.getByRole("button", { name: "写作助手" }).click();
   const drawer = page.locator("#assistant-drawer");
-  await expect(drawer).toHaveAttribute("aria-hidden", "false");
+  await expect(drawer).toBeVisible();
   return drawer;
 }
 
@@ -330,6 +330,7 @@ test.describe("context x-ray regression", () => {
     await Promise.all([settingsResponse, cardsResponse]);
     await page.waitForTimeout(150);
 
+    await drawer.getByRole("tab", { name: "对话" }).click();
     const composer = drawer.locator(".composer textarea");
     const sendButton = drawer.locator(".composer button");
 
@@ -340,7 +341,7 @@ test.describe("context x-ray regression", () => {
     const fallbackToken = drawer
       .locator("article.msg.assistant")
       .last()
-      .locator('.context-xray-token[data-context-xray-source="fallback"]', { hasText: "古剑" });
+      .locator('[data-context-xray-source="fallback"]', { hasText: "古剑" });
     await expect(fallbackToken).toBeVisible();
     await fallbackToken.hover();
     await expect(page.getByRole("tooltip")).toContainText("设定回退");
@@ -359,7 +360,7 @@ test.describe("context x-ray regression", () => {
     const streamingEvidenceToken = drawer
       .locator("article.msg.assistant")
       .last()
-      .locator('.context-xray-token[data-context-xray-source="evidence"]', { hasText: "神剑" });
+      .locator('[data-context-xray-source="evidence"]', { hasText: "神剑" });
     await expect(streamingEvidenceToken).toBeVisible({ timeout: 1_200 });
 
     await expect(sendButton).toHaveText("发送", { timeout: 10_000 });

@@ -49,6 +49,7 @@ type UseAssistantSessionFlowArgs = {
   streaming: boolean;
   assistantDrawerOpen: boolean;
   setAssistantDrawerOpen: Dispatch<SetStateAction<boolean>>;
+  setAssistantSection: (section: "planning" | "chat") => void;
   composerInputRef: MutableRefObject<HTMLTextAreaElement | null>;
   assistantDrawerReturnFocusRef: MutableRefObject<HTMLElement | null>;
   previousAssistantDrawerOpenRef: MutableRefObject<boolean>;
@@ -82,6 +83,7 @@ export function useAssistantSessionFlow({
   streaming,
   assistantDrawerOpen,
   setAssistantDrawerOpen,
+  setAssistantSection,
   composerInputRef,
   assistantDrawerReturnFocusRef,
   previousAssistantDrawerOpenRef,
@@ -147,17 +149,17 @@ export function useAssistantSessionFlow({
     setAssistantDrawerOpen(false);
   }, [setAssistantDrawerOpen]);
 
-  const openAssistantDrawerAndFocusComposer = useCallback(() => {
+  const openAssistantDrawer = useCallback(() => {
     if (!assistantDrawerOpen) {
       rememberActiveElement(assistantDrawerReturnFocusRef);
     }
+    setAssistantSection("planning");
     setAssistantDrawerOpen(true);
-    focusAssistantComposer();
   }, [
     assistantDrawerOpen,
     assistantDrawerReturnFocusRef,
-    focusAssistantComposer,
     rememberActiveElement,
+    setAssistantSection,
     setAssistantDrawerOpen,
   ]);
 
@@ -166,11 +168,11 @@ export function useAssistantSessionFlow({
       const next = !prev;
       if (next) {
         rememberActiveElement(assistantDrawerReturnFocusRef);
-        window.setTimeout(() => focusAssistantComposer(0), 0);
+        setAssistantSection("planning");
       }
       return next;
     });
-  }, [assistantDrawerReturnFocusRef, focusAssistantComposer, rememberActiveElement, setAssistantDrawerOpen]);
+  }, [assistantDrawerReturnFocusRef, rememberActiveElement, setAssistantSection, setAssistantDrawerOpen]);
 
   const startNewSession = useCallback(() => {
     resetSessionState();
@@ -502,7 +504,7 @@ export function useAssistantSessionFlow({
     focusAssistantComposer,
     rememberActiveElement,
     closeAssistantDrawer,
-    openAssistantDrawerAndFocusComposer,
+    openAssistantDrawer,
     toggleAssistantDrawer,
     startNewSession,
     switchSession,

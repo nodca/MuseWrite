@@ -27,6 +27,9 @@ def _recent_turns_have_content(turns: list[dict[str, Any]]) -> bool:
     return False
 
 
+_TOM_BATCH_THRESHOLD = 5
+
+
 async def _infer_second_order_deltas_for_holder(
     *,
     holder_id: int,
@@ -187,6 +190,185 @@ async def _infer_second_order_deltas_for_holder(
     return deltas
 
 
+def _build_holder_block(
+    holder_id: int,
+    mind: Any,
+    allowed_subject_ids: set[int],
+) -> str:
+    holder_facts = list(mind.known_fact_keys or [])[:40]
+    holder_beliefs = [
+        {
+            "fact_key": item.fact_key,
+            "stance": item.stance,
+            "confidence": item.confidence,
+        }
+        for item in mind.beliefs[:20]
+    ]
+    existing = [
+        {
+            "subject_id": item.subject_id,
+            "fact_key": item.fact_key,
+            "believed_knowledge_state": item.believed_knowledge_state,
+            "confidence": item.confidence,
+            "source_turn_id": item.source_turn_id,
+        }
+        for item in mind.beliefs_about_others[:30]
+    ]
+    return (
+        f"### holder_id={holder_id}\n"
+        f"已知事实键（节选）: {holder_facts}\n"
+        f"一阶 belief（节选）: {holder_beliefs}\n"
+        f"当前二阶 belief（节选）: {existing}\n"
+        f"允许的 subject_ids: {sorted(sid for sid in allowed_subject_ids if sid != holder_id)}\n"
+    )
+
+
+async def _infer_second_order_deltas_batched(
+    *,
+    holder_ids: list[int],
+    allowed_subject_ids: set[int],
+    world_state: WorldState,
+    session_state: SessionStateRecord,
+    runtime_config: Any = None,
+) -> dict[int, list[SecondOrderBelief]]:
+    """批量推断多个角色的二阶信念，单次 LLM 调用。"""
+
+    holder_blocks: list[str] = []
+    for hid in holder_ids:
+        mind = _load_mind_state(session_state.mind_states, hid)
+        holder_blocks.append(_build_holder_block(hid, mind, allowed_subject_ids))
+
+    recent_turns = list(world_state.recent_turns or [])[-12:]
+    user_input = (
+        "你是一个 ToM(Theory of Mind) 批量更新器。你的任务是：基于'最近对白(公共)'与'每个角色当前心智(私有)'，"
+        "为每个角色生成二阶 belief 增量（只到二阶，严禁三阶）。\n\n"
+        "严禁基于规则/关键词匹配来判断知道与否；必须做自然语言理解后再给出结构化结果。\n\n"
+        "## 需要更新的角色\n"
+        + "\n".join(holder_blocks)
+        + "\n## 最近对白（公共）\n"
+        f"{recent_turns}\n\n"
+        "请输出 proposed_actions：必须且只能输出 1 个 setting.upsert，作为内部结构化 ToM 增量：\n"
+        "  - payload.key 固定为 __internal.simulation.tom_delta__\n"
+        "  - payload.value 必须是 JSON 对象，结构如下：\n"
+        "    {\n"
+        "      \"beliefs_about_others\": [\n"
+        "        {\n"
+        "          \"holder_id\": int,\n"
+        "          \"subject_id\": int,\n"
+        "          \"fact_key\": \"短而稳定的事实键(建议snake_case, <=80字)\",\n"
+        "          \"believed_knowledge_state\": \"knows|denies|uncertain|suspects|unknown\",\n"
+        "          \"confidence\": float,\n"
+        "          \"source_turn_id\": int|null\n"
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "约束：\n"
+        f"- holder_id 必须属于 {sorted(holder_ids)}\n"
+        f"- subject_id 必须属于 {sorted(allowed_subject_ids)} 且 subject_id != holder_id\n"
+        "- source_turn_id 优先填写最近对白中的 turn_index；不确定则填 null\n"
+        f"- 每个 holder 最多输出 8 条；总计最多 {len(holder_ids) * 8} 条\n"
+        "- 没有有效增量的 holder 可以不输出任何条目\n"
+        "assistant_text 可以为空，不要写剧情正文。\n"
+    )
+
+    result = await generate_chat(
+        user_input,
+        context={
+            "pov": {
+                "mode": "global",
+                "anchor": None,
+                "notes": [],
+            }
+        },
+        model_override=None,
+        thinking_enabled=False,
+        temperature_profile="action",
+        temperature_override=None,
+        runtime_config=runtime_config,
+    )
+
+    actions = list(result.proposed_actions or [])
+    if len(actions) != 1:
+        raise ToMUpdateError(
+            "TOM_BATCH_ACTIONS_NOT_ALLOWED",
+            {"holder_ids": holder_ids, "action_count": len(actions)},
+        )
+    action = actions[0]
+    if action.get("action_type") != "setting.upsert":
+        raise ToMUpdateError(
+            "TOM_BATCH_MISSING_DELTA",
+            {"holder_ids": holder_ids, "action_type": action.get("action_type")},
+        )
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    if payload.get("key") != "__internal.simulation.tom_delta__":
+        raise ToMUpdateError(
+            "TOM_BATCH_MISSING_DELTA",
+            {"holder_ids": holder_ids, "key": payload.get("key")},
+        )
+    tom_value = payload.get("value")
+    if not isinstance(tom_value, dict):
+        raise ToMUpdateError(
+            "TOM_BATCH_DELTA_INVALID",
+            {"holder_ids": holder_ids, "tom_value": tom_value},
+        )
+
+    raw_items = tom_value.get("beliefs_about_others")
+    if not isinstance(raw_items, list):
+        raise ToMUpdateError(
+            "TOM_BATCH_DELTA_INVALID",
+            {"holder_ids": holder_ids, "tom_value": tom_value},
+        )
+    max_total = len(holder_ids) * 8
+    if len(raw_items) > max_total:
+        raise ToMUpdateError(
+            "TOM_BATCH_DELTA_TOO_MANY",
+            {"holder_ids": holder_ids, "count": len(raw_items), "max": max_total},
+        )
+
+    holder_id_set = set(holder_ids)
+    deltas_by_holder: dict[int, list[SecondOrderBelief]] = {hid: [] for hid in holder_ids}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise ToMUpdateError(
+                "TOM_BATCH_DELTA_INVALID",
+                {"holder_ids": holder_ids, "item_type": type(item).__name__},
+            )
+        belief = SecondOrderBelief.model_validate(item)
+        if belief.believed_knowledge_state not in {
+            "knows", "denies", "uncertain", "suspects", "unknown",
+        }:
+            raise ToMUpdateError(
+                "TOM_INVALID_KNOWLEDGE_STATE",
+                {"holder_id": belief.holder_id, "knowledge_state": belief.believed_knowledge_state},
+            )
+        if int(belief.holder_id) not in holder_id_set:
+            raise ToMUpdateError(
+                "TOM_BATCH_HOLDER_OUT_OF_SCOPE",
+                {"holder_id": belief.holder_id, "allowed": sorted(holder_ids)},
+            )
+        if int(belief.subject_id) == int(belief.holder_id):
+            raise ToMUpdateError(
+                "TOM_SUBJECT_SELF",
+                {"holder_id": belief.holder_id},
+            )
+        if int(belief.subject_id) not in allowed_subject_ids:
+            raise ToMUpdateError(
+                "TOM_SUBJECT_OUT_OF_SCOPE",
+                {"holder_id": belief.holder_id, "subject_id": belief.subject_id},
+            )
+        deltas_by_holder[int(belief.holder_id)].append(belief)
+
+    # 校验每个 holder 不超过 8 条
+    for hid, beliefs in deltas_by_holder.items():
+        if len(beliefs) > 8:
+            raise ToMUpdateError(
+                "TOM_BATCH_DELTA_TOO_MANY",
+                {"holder_id": hid, "count": len(beliefs)},
+            )
+
+    return deltas_by_holder
+
+
 async def update_second_order_beliefs_from_turns(
     world_state: WorldState,
     session_state: SessionStateRecord,
@@ -215,6 +397,27 @@ async def update_second_order_beliefs_from_turns(
         holder_ids.append(holder_id)
     allowed_subject_ids = set(holder_ids)
 
+    if len(holder_ids) <= _TOM_BATCH_THRESHOLD:
+        # 批量模式：单次 LLM 调用推断所有角色
+        deltas_by_holder = await _infer_second_order_deltas_batched(
+            holder_ids=holder_ids,
+            allowed_subject_ids=allowed_subject_ids,
+            world_state=world_state,
+            session_state=session_state,
+            runtime_config=runtime_config,
+        )
+        next_states = dict(session_state.mind_states)
+        for holder_id in holder_ids:
+            deltas = deltas_by_holder.get(holder_id, [])
+            mind = _load_mind_state(next_states, int(holder_id))
+            second_order = list(mind.beliefs_about_others)
+            for delta in deltas:
+                second_order = _upsert_second_order(second_order, delta)
+            mind = mind.model_copy(update={"beliefs_about_others": second_order})
+            next_states[str(holder_id)] = mind.model_dump(mode="json")
+        return session_state.model_copy(update={"mind_states": next_states})
+
+    # 独立并行模式：每角色一次 LLM 调用
     tasks = [
         _infer_second_order_deltas_for_holder(
             holder_id=int(holder_id),

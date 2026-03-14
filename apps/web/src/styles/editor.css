@@ -1,0 +1,377 @@
+/* ─── Editor / ProseMirror Styles ───
+   Extracted from styles.css — these are TipTap/ProseMirror-specific rules
+   that cannot be easily expressed as Tailwind utility classes.
+   They remain as traditional CSS and coexist with Tailwind. */
+
+/* ── Writing Theme Variables (editor font/layout only) ── */
+:root {
+  --draft-font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+  --draft-font-size: 17px;
+  --draft-line-height: 1.72;
+  --draft-max-width: 72ch;
+  --draft-paragraph-gap: 0.95em;
+  --draft-shell-bg: rgba(255, 255, 255, 0.82);
+  --draft-editor-bg: rgba(255, 255, 255, 0.56);
+}
+
+.page-shell[data-writing-theme="paper"] {
+  --draft-shell-bg: rgba(255, 255, 255, 0.84);
+  --draft-editor-bg: rgba(255, 255, 255, 0.58);
+  --draft-font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+  --draft-line-height: 1.72;
+}
+
+.page-shell[data-writing-theme="wenkai"] {
+  --draft-shell-bg: rgba(255, 252, 246, 0.86);
+  --draft-editor-bg: rgba(255, 252, 246, 0.64);
+  --draft-font-family: "LXGW WenKai", "Kaiti SC", "STKaiti", "KaiTi", serif;
+  --draft-line-height: 1.75;
+  --draft-font-size: 17px;
+}
+
+.page-shell[data-writing-theme="modern"] {
+  --draft-shell-bg: rgba(249, 252, 255, 0.88);
+  --draft-editor-bg: rgba(249, 252, 255, 0.64);
+  --draft-font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --draft-line-height: 1.68;
+  --draft-font-size: 16px;
+}
+
+.page-shell[data-writing-theme="contrast"] {
+  --draft-shell-bg: rgba(255, 255, 255, 0.92);
+  --draft-editor-bg: rgba(255, 255, 255, 0.84);
+  --draft-font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif;
+  --draft-line-height: 1.66;
+  --draft-font-size: 17px;
+}
+
+/* Dark theme overrides for editor shell */
+[data-theme="dark"] .draft-editor-shell {
+  --draft-shell-bg: rgba(34, 35, 38, 0.92);
+  --draft-editor-bg: rgba(30, 31, 34, 0.8);
+}
+
+[data-theme="dark"] .draft-editor-toolbar {
+  background: rgba(34, 35, 38, 0.96);
+}
+
+[data-theme="dark"] .selection-context-menu {
+  background: rgba(46, 47, 52, 0.98);
+  border-color: var(--border-default);
+}
+
+/* ── Editor Shell ── */
+.draft-editor-shell {
+  border: 1px solid var(--border-default, var(--line));
+  border-radius: 14px;
+  background: var(--draft-shell-bg);
+  overflow: hidden;
+}
+
+.draft-editor-shell.chapter-switching {
+  animation: chapter-switch-fade 200ms ease-out;
+}
+
+.draft-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-default, var(--line));
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.draft-editor-toolbar small {
+  color: var(--text-secondary, var(--text-muted));
+}
+
+.draft-editor-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.draft-toolbar-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.draft-editor-context {
+  position: relative;
+}
+
+/* ── Selection Context Menu ── */
+.selection-context-menu {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 146px;
+  padding: 8px;
+  border: 1px solid var(--border-default, var(--line));
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 8px 18px rgba(18, 26, 44, 0.2);
+}
+
+.selection-context-menu .btn {
+  display: inline-flex;
+  width: 100%;
+  justify-content: flex-start;
+  align-items: center;
+}
+
+/* ── ProseMirror Core ── */
+.draft-editor .ProseMirror {
+  min-height: 280px;
+  max-height: 68vh;
+  overflow: auto;
+  padding: 18px clamp(14px, 3vw, 34px) 24px;
+  word-break: break-word;
+  outline: none;
+  line-height: var(--draft-line-height);
+  font-size: var(--draft-font-size);
+  white-space: pre-wrap;
+  font-family: var(--draft-font-family);
+}
+
+.draft-editor .ProseMirror > * {
+  max-width: var(--draft-max-width);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.draft-editor .ProseMirror p {
+  margin: 0 auto var(--draft-paragraph-gap);
+}
+
+.draft-editor .ProseMirror p:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Diff Suggestion ── */
+.draft-editor .ProseMirror .diff-original-text {
+  color: #b42318;
+  background: rgba(217, 45, 32, 0.12);
+  text-decoration: line-through;
+  border-radius: 4px;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-widget {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 4px;
+  padding: 2px 8px;
+  border: 1px solid rgba(18, 183, 106, 0.2);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(226, 252, 239, 0.98), rgba(238, 252, 245, 0.92));
+  box-shadow: 0 8px 18px rgba(11, 112, 67, 0.12);
+  vertical-align: middle;
+}
+
+[data-theme="dark"] .draft-editor .ProseMirror .diff-suggestion-widget {
+  background: linear-gradient(135deg, rgba(20, 60, 40, 0.9), rgba(25, 65, 45, 0.85));
+  border-color: rgba(18, 183, 106, 0.3);
+}
+
+.draft-editor .ProseMirror .diff-suggested-text {
+  color: #027a48;
+  white-space: pre-wrap;
+}
+
+[data-theme="dark"] .draft-editor .ProseMirror .diff-suggested-text {
+  color: #34d399;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-widget:hover .diff-suggestion-actions {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.draft-editor .ProseMirror .diff-suggestion-action {
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-action.accept {
+  color: #f8fffb;
+  background: #027a48;
+}
+
+.draft-editor .ProseMirror .diff-suggestion-action.reject {
+  color: #6941c6;
+  background: rgba(105, 65, 198, 0.12);
+}
+
+/* ── Entity Inline Hints ── */
+.draft-editor .ProseMirror .entity-inline-hint {
+  position: relative;
+  cursor: help;
+  text-decoration: underline dotted rgba(38, 87, 217, 0.38);
+  text-underline-offset: 3px;
+  background: rgba(38, 87, 217, 0.08);
+  border-radius: 2px;
+  transition: background 0.16s ease;
+}
+
+.draft-editor .ProseMirror .entity-inline-hint::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 2px);
+  transform: translateX(-50%) translateY(2px);
+  border: 6px solid transparent;
+  border-top-color: rgba(15, 23, 42, 0.92);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 18;
+}
+
+.draft-editor .ProseMirror .entity-inline-hint::after {
+  content: attr(data-entity-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%) translateY(2px);
+  min-width: 66px;
+  max-width: min(64vw, 360px);
+  padding: 5px 10px;
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #f8fbff;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+  box-shadow: 0 8px 20px rgba(10, 18, 36, 0.26);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 19;
+}
+
+.draft-editor .ProseMirror .entity-inline-hint:hover {
+  background: rgba(38, 87, 217, 0.16);
+}
+
+.draft-editor .ProseMirror .entity-inline-hint:hover::before,
+.draft-editor .ProseMirror .entity-inline-hint:hover::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(-3px);
+}
+
+/* ── Placeholder ── */
+.draft-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--text-secondary, var(--text-muted));
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ── Focus Mode ── */
+.draft-editor-shell.focus-mode {
+  --draft-font-size: 18px;
+  --draft-line-height: 1.78;
+  --draft-max-width: 70ch;
+  --draft-paragraph-gap: 1.08em;
+}
+
+/* ── Typewriter Mode ── */
+.draft-editor .ProseMirror.typewriter-dimming-active p {
+  opacity: 0.34;
+  transition: opacity 0.16s ease;
+}
+
+.draft-editor .ProseMirror.typewriter-dimming-active p.is-typewriter-active-paragraph,
+.draft-editor .ProseMirror.typewriter-dimming-active p.is-editor-empty:first-child {
+  opacity: 1;
+}
+
+/* ── Disabled State ── */
+.draft-editor.disabled {
+  background: rgba(245, 247, 255, 0.72);
+  color: var(--text-secondary);
+  cursor: not-allowed;
+}
+
+[data-theme="dark"] .draft-editor.disabled {
+  background: rgba(30, 31, 34, 0.72);
+}
+
+/* ── Zen Mode ── */
+.page-shell.zen-mode .draft-editor-shell {
+  border: 0;
+  border-radius: 18px;
+  background: var(--surface-primary, rgba(253, 252, 248, 0.92));
+  box-shadow: 0 14px 34px rgba(73, 66, 50, 0.08);
+}
+
+.page-shell.zen-mode .draft-editor-toolbar {
+  border-bottom: 0;
+  background: var(--surface-primary, rgba(253, 252, 248, 0.96));
+}
+
+.page-shell.zen-mode .draft-editor {
+  min-height: calc(100vh - 180px);
+  max-height: none;
+  background: transparent;
+}
+
+.page-shell.zen-mode .draft-editor .ProseMirror {
+  min-height: calc(100vh - 180px);
+  max-height: none;
+  padding: 30px min(12vw, 150px) 38px;
+  font-size: var(--draft-font-size);
+  line-height: var(--draft-line-height);
+}
+
+/* ── Animations ── */
+@keyframes chapter-switch-fade {
+  from {
+    opacity: 0.72;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Responsive ── */
+@media (max-width: 680px) {
+  .page-shell.zen-mode .draft-editor .ProseMirror {
+    padding: 18px 14px 24px;
+    font-size: 17px;
+    line-height: 1.74;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draft-editor-shell.chapter-switching {
+    animation: none;
+  }
+
+  .draft-editor .ProseMirror .diff-suggestion-actions,
+  .draft-editor .ProseMirror .entity-inline-hint,
+  .draft-editor .ProseMirror .entity-inline-hint::before,
+  .draft-editor .ProseMirror .entity-inline-hint::after {
+    transition: none;
+  }
+}

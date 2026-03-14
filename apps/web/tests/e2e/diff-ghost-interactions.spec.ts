@@ -201,6 +201,26 @@ async function installMockChatApi(page: Page, options: MockChatApiOptions = {}):
       return;
     }
 
+    if (
+      (path === "/api/chat/rewrite/polish" || path === "/api/chat/rewrite/expand") &&
+      method === "POST"
+    ) {
+      const rawBody = request.postData() ?? "{}";
+      const parsedBody = JSON.parse(rawBody) as {
+        text?: string;
+      };
+      const source = String(parsedBody.text ?? "").trim() || "片段";
+      const suggestion =
+        path.endsWith("/expand")
+          ? `${source}，扩写后补进了更多动作与氛围。`
+          : `${source}，润色后语气更凝练。`;
+      await fulfillJson(route, {
+        suggestion,
+        usage: { provider: "mock", mode: path.endsWith("/expand") ? "expand" : "polish" },
+      });
+      return;
+    }
+
     if (path === `/api/chat/projects/${projectId}/graph-timeline` && method === "GET") {
       await fulfillJson(route, {
         project_id: projectId,
@@ -280,7 +300,7 @@ async function installMockChatApi(page: Page, options: MockChatApiOptions = {}):
 }
 
 async function ensureChapterReady(page: Page): Promise<void> {
-  await expect(page.getByRole("heading", { name: "正文工作区" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".page-shell")).toBeVisible({ timeout: 30_000 });
   const createChapterButton = page.getByRole("button", { name: "点击新建章节开始写作" });
   if (await createChapterButton.isVisible()) {
     await createChapterButton.click();
@@ -290,7 +310,7 @@ async function ensureChapterReady(page: Page): Promise<void> {
   await expect(editorSurface).toHaveAttribute("contenteditable", "true", { timeout: 30_000 });
 }
 
-test.describe("diff/ghost interactions", () => {
+test.describe("editor rewrite interactions", () => {
   test("diff suggestions support accept & ignore cherry-pick", async ({ page }) => {
     const assistantReply = "AI 建议替换：diff-accept";
     await installMockChatApi(page, { assistantText: assistantReply });
@@ -302,13 +322,15 @@ test.describe("diff/ghost interactions", () => {
     await editorSurface.click();
     await page.keyboard.type("旧文本：alpha beta");
 
-    await page.getByRole("button", { name: "助手抽屉" }).click();
+    await page.getByRole("button", { name: "写作助手" }).click();
     const drawer = page.locator("#assistant-drawer");
-    await expect(drawer).toHaveAttribute("aria-hidden", "false");
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole("tab", { name: "对话" }).click();
+    await expect(drawer.locator(".composer textarea")).toBeVisible();
     await drawer.locator(".composer textarea").fill("diff e2e");
     await drawer.locator(".composer button").click();
     await expect(drawer.locator(".chat-log article.msg.assistant pre")).toContainText(assistantReply);
-    await drawer.getByRole("button", { name: "关闭助手抽屉" }).click();
+    await drawer.getByRole("button", { name: "关闭写作助手" }).click();
 
     await editorSurface.click();
     await page.keyboard.press("Control+a");
@@ -336,118 +358,35 @@ test.describe("diff/ghost interactions", () => {
     await expect(editorSurface).toContainText("旧文本：reject-path");
   });
 
-  test("ghost text accepts full suggestion via Tab and one word via Ctrl+ArrowRight", async ({ page }) => {
-    await page.addInitScript(() => {
-      const listenersSymbol = Symbol("ws_listeners");
-      let sendCount = 0;
-
-      function emit(target: any, type: string, event: any) {
-        const map = target[listenersSymbol] as Map<string, Set<(event: any) => void>> | undefined;
-        if (!map) return;
-        const handlers = map.get(type);
-        if (!handlers) return;
-        handlers.forEach((cb) => {
-          try {
-            cb(event);
-          } catch {
-            // ignore handler failures in test shim
-          }
-        });
-      }
-
-      class MockWebSocket {
-        static CONNECTING = 0;
-        static OPEN = 1;
-        static CLOSING = 2;
-        static CLOSED = 3;
-
-        url: string;
-        readyState = MockWebSocket.CONNECTING;
-        [listenersSymbol] = new Map<string, Set<(event: any) => void>>();
-
-        constructor(url: string) {
-          this.url = url;
-          queueMicrotask(() => {
-            this.readyState = MockWebSocket.OPEN;
-            emit(this, "open", {});
-          });
-        }
-
-        addEventListener(type: string, cb: (event: any) => void) {
-          const map = this[listenersSymbol];
-          const handlers = map.get(type) ?? new Set();
-          handlers.add(cb);
-          map.set(type, handlers);
-        }
-
-        removeEventListener(type: string, cb: (event: any) => void) {
-          const map = this[listenersSymbol];
-          map.get(type)?.delete(cb);
-        }
-
-        close() {
-          if (this.readyState === MockWebSocket.CLOSED) return;
-          this.readyState = MockWebSocket.CLOSED;
-          emit(this, "close", {});
-        }
-
-        send(raw: string) {
-          if (this.readyState !== MockWebSocket.OPEN) return;
-          try {
-            JSON.parse(String(raw ?? "{}"));
-          } catch {
-            // ignore invalid payloads
-          }
-          sendCount += 1;
-          const suggestion = sendCount === 1 ? "spectral quill" : "gamma delta";
-
-          const emitMessage = (payload: any) => {
-            emit(this, "message", { data: JSON.stringify(payload) });
-          };
-
-          queueMicrotask(() => emitMessage({ type: "start", text: "" }));
-          queueMicrotask(() => emitMessage({ type: "delta", text: suggestion.split(" ")[0] + " " }));
-          queueMicrotask(() => emitMessage({ type: "delta", text: suggestion.split(" ").slice(1).join(" ") }));
-          queueMicrotask(() => emitMessage({ type: "done", text: suggestion }));
-        }
-      }
-
-      (window as any).WebSocket = MockWebSocket;
-    });
-
+  test("selection rewrite opens diff feedback after polish action", async ({ page }) => {
     await installMockChatApi(page);
     await page.goto("/");
-
-    await page.getByRole("button", { name: "写作设置" }).click();
-    const settingsDialog = page.locator("#settings-dialog");
-    await expect(settingsDialog).toBeVisible();
-    await settingsDialog.locator("details.settings-section", { hasText: "高级调优" }).locator("summary").click();
-    await settingsDialog.getByLabel("Ghost 自动建议").selectOption("on");
-    await settingsDialog.getByRole("button", { name: "关闭写作设置" }).click();
-    await expect(settingsDialog).toBeHidden();
 
     await ensureChapterReady(page);
 
     const editorSurface = page.locator(".draft-editor .ProseMirror");
     await editorSurface.click();
-    await page.keyboard.type("prefix ");
+    await page.keyboard.type("待润色片段");
+    await page.keyboard.press("Control+a");
+    await expect(page.locator(".draft-hint")).toContainText("已选", { timeout: 10_000 });
 
-    const ghostWidget = page.locator(".ghost-text-widget");
-    await expect(ghostWidget).toContainText("spectral quill", { timeout: 15_000 });
+    await page.locator(".draft-editor-context").dispatchEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 240,
+      clientY: 240,
+      button: 2,
+    });
+    const menu = page.locator(".selection-context-menu");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: /润色选中/ })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: /扩写选中/ })).toBeVisible();
+    await menu.getByRole("menuitem", { name: /润色选中/ }).click();
 
-    await editorSurface.focus();
-    await page.keyboard.press("Tab");
-    await expect(ghostWidget).toHaveCount(0);
-    await expect(editorSurface).toContainText("spectral quill");
-
-    await expect(page.locator(".ghost-text-widget")).toContainText("gamma delta", { timeout: 15_000 });
-    const saveDraftButton = page.locator(".draft-actions button.btn.primary.tiny").first();
-    await expect(saveDraftButton).toHaveText("保存正文", { timeout: 15_000 });
-    await editorSurface.focus();
-    await page.keyboard.down("Control");
-    await page.keyboard.press("ArrowRight");
-    await page.keyboard.up("Control");
-    await expect(page.locator(".ghost-text-widget")).toHaveText("delta");
-    await expect(editorSurface).toContainText("gamma");
+    const diffWidget = page.locator(".diff-suggestion-widget");
+    await expect(diffWidget).toBeVisible();
+    await expect(diffWidget.getByRole("button", { name: "接受" })).toBeVisible();
+    await expect(diffWidget.getByRole("button", { name: "忽略" })).toBeVisible();
   });
 });
+

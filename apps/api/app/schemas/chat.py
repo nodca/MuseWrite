@@ -25,9 +25,10 @@ class ChatStreamRequest(BaseModel):
     enable_tot: bool = False
     current_location: Optional[str] = Field(default=None, max_length=128)
     model_profile_id: Optional[str] = Field(default=None, max_length=64)
+    web_search: bool = False
 
 
-class GhostTextRewriteRequest(BaseModel):
+class SelectionRewriteRequest(BaseModel):
     project_id: int
     chapter_id: Optional[int] = Field(default=None, ge=1)
     scene_beat_id: Optional[int] = Field(default=None, ge=1)
@@ -42,12 +43,12 @@ class GhostTextRewriteRequest(BaseModel):
     model_profile_id: Optional[str] = Field(default=None, max_length=64)
 
 
-class GhostTextResponse(BaseModel):
+class SelectionRewriteResponse(BaseModel):
     suggestion: str
     usage: dict
 
 
-class GhostTextStreamRequest(BaseModel):
+class InlineSuggestionStreamRequest(BaseModel):
     project_id: int
     chapter_id: Optional[int] = Field(default=None, ge=1)
     scene_beat_id: Optional[int] = Field(default=None, ge=1)
@@ -63,7 +64,7 @@ class GhostTextStreamRequest(BaseModel):
     model_profile_id: Optional[str] = Field(default=None, max_length=64)
 
 
-class GhostTextStreamEvent(BaseModel):
+class InlineSuggestionStreamEvent(BaseModel):
     type: Literal["start", "delta", "done", "error"]
     text: str = ""
     usage: dict = Field(default_factory=dict)
@@ -537,3 +538,4 @@ class GraphCandidateBatchReviewResponse(BaseModel):
     requested_count: int
     reviewed_count: int
     fact_keys: list[str] = Field(default_factory=list)
+

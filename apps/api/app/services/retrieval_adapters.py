@@ -13,6 +13,13 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     GraphDatabase = None
 
+# ---------------------------------------------------------------------------
+# LightRAG API path constants (implementation detail, not user-facing).
+# ---------------------------------------------------------------------------
+_LIGHTRAG_QUERY_PATH = "/query/data"
+_LIGHTRAG_EXTRACT_PATH = "/extract_graph"
+_LIGHTRAG_REBUILD_PATH = "/documents/rebuild"
+
 
 def _truncate_text(text: str, max_chars: int) -> str:
     content = (text or "").strip()
@@ -362,9 +369,7 @@ def fetch_lightrag_graph_candidates(
     if not settings.lightrag_graph_from_query_enabled:
         return []
 
-    query_path = settings.lightrag_query_path.strip() or "/query/data"
-    if not query_path.startswith("/"):
-        query_path = "/" + query_path
+    query_path = _LIGHTRAG_QUERY_PATH
     query_endpoint = settings.lightrag_base_url.rstrip("/") + query_path
 
     body = _build_lightrag_query_body(
@@ -405,9 +410,7 @@ def fetch_lightrag_semantic_hits(
     if not settings.lightrag_base_url:
         return []
 
-    path = settings.lightrag_query_path.strip() or "/query"
-    if not path.startswith("/"):
-        path = "/" + path
+    path = _LIGHTRAG_QUERY_PATH
     endpoint = settings.lightrag_base_url.rstrip("/") + path
 
     body = _build_lightrag_query_body(
@@ -1622,9 +1625,7 @@ def trigger_lightrag_rebuild(project_id: int, *, reason: str = "") -> bool:
     if not settings.lightrag_base_url:
         return False
 
-    path = settings.lightrag_rebuild_path.strip() or "/documents/rebuild"
-    if not path.startswith("/"):
-        path = "/" + path
+    path = _LIGHTRAG_REBUILD_PATH
     endpoint = settings.lightrag_base_url.rstrip("/") + path
 
     headers: dict[str, str] = {}

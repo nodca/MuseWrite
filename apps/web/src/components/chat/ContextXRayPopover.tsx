@@ -27,7 +27,7 @@ export function ContextXRayPopover({
 
   return createPortal(
     <div
-      className={`context-xray-popover ${showAbove ? "above" : "below"}`}
+      className="rounded-lg bg-surface-elevated border border-border-default shadow-lg p-3 text-sm z-50"
       role="tooltip"
       style={{
         position: "fixed",
@@ -36,7 +36,7 @@ export function ContextXRayPopover({
         width,
       }}
     >
-      <div className="context-xray-popover-badge">{badge}</div>
+      <div className="inline-block rounded-full bg-accent-secondary text-accent-primary text-xs font-medium px-2 py-0.5 mb-1">{badge}</div>
       <strong>{canonical}</strong>
       <p>{excerpt}</p>
     </div>,

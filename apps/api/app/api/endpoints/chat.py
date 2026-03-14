@@ -7,6 +7,7 @@ from app.core.auth import (
     filter_accessible_project_ids,
     get_current_principal,
 )
+from app.core.config import settings
 from app.core.database import get_session
 from app.schemas.chat import ChatStreamRequest
 from app.services.chat_service import (
@@ -28,7 +29,7 @@ from .chat_helpers import (
     ensure_session_member_access as _ensure_session_access,
 )
 from .chat_stream_pipeline import stream_chat_events
-from .chat_ghost_text import router as ghost_text_router
+from .chat_writing_assist import router as writing_assist_router
 from .chat_documents import router as documents_router
 from .chat_graph_ops import router as graph_ops_router
 from .chat_index_lifecycle import router as index_lifecycle_router
@@ -47,7 +48,7 @@ router.include_router(index_lifecycle_router)
 router.include_router(project_assets_router)
 router.include_router(story_workspace_router)
 router.include_router(runtime_ops_router)
-router.include_router(ghost_text_router)
+router.include_router(writing_assist_router)
 
 
 @router.post("/stream")
@@ -109,7 +110,12 @@ async def chat_stream(
         budget_mode=payload.budget_mode,
         current_location=payload.current_location,
         temperature_profile=payload.temperature_profile,
+        web_search_enabled=payload.web_search,
     )
+
+    # ── Book Memory OS injection (feature flag) ──
+    if settings.use_memory_pipeline and payload.chapter_id:
+        _inject_book_memory(db, compiled_bundle, payload)
     assistant_msg = append_message(
         db=db,
         session_id=session.id,
@@ -143,4 +149,70 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _inject_book_memory(
+    db: Session,
+    compiled_bundle,
+    payload: ChatStreamRequest,
+) -> None:
+    """Inject Book Memory OS context into an existing CompiledContextBundle.
+
+    When ``USE_MEMORY_PIPELINE`` is enabled this enriches the bundle
+    with structured memory from L1-L4 layers.  The legacy retrieval
+    context is preserved; memory is additive.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        from app.services.book_memory.memory_pipeline import build_planning_memory_context
+
+        chapter_index = None
+        if payload.chapter_id:
+            from app.services.chat_service.chapters import get_project_chapter
+
+            chapter = get_project_chapter(db, payload.project_id, payload.chapter_id)
+            if chapter:
+                chapter_index = int(chapter.chapter_index)
+
+        memory_ctx = build_planning_memory_context(
+            db,
+            project_id=payload.project_id,
+            chapter_id=payload.chapter_id,
+            scene_beat_id=payload.scene_beat_id,
+            chapter_index=chapter_index,
+        )
+
+        # ── Inject into model_context ──
+        prompt_text = memory_ctx.to_prompt_text()
+        if prompt_text:
+            compiled_bundle.model_context["book_memory"] = {
+                "enabled": True,
+                "hint": prompt_text,
+                "layers_used": [
+                    {"layer": l.layer, "label": l.label, "items": l.items}
+                    for l in memory_ctx.layers_used
+                ],
+                "l5_triggered": memory_ctx.l5_triggered,
+            }
+
+        # ── Inject into evidence_event (for Context X-Ray) ──
+        compiled_bundle.evidence_event["book_memory"] = {
+            "enabled": True,
+            "layers": [
+                {"layer": l.layer, "label": l.label, "items": l.items}
+                for l in memory_ctx.layers_used
+            ],
+            "l5_triggered": memory_ctx.l5_triggered,
+            "sections": [
+                {"label": s["label"], "chars": len(s.get("content", ""))}
+                for s in memory_ctx.to_prompt_sections()
+            ],
+        }
+
+    except Exception:
+        logger.warning("book memory injection failed", exc_info=True)
+
 

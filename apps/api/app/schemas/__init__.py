@@ -21,6 +21,14 @@ from app.schemas.chat import (
     SettingEntryRead,
     StoryCardRead,
 )
+from app.schemas.book_memory import (
+    CharacterKnowledgeStateRead,
+    CharacterProfileRead,
+    MemoryMaterializationRead,
+    StoryEpisodeRead,
+    StoryStateSnapshotRead,
+    WorldRuleRead,
+)
 
 __all__ = [
     "ChatStreamRequest",
@@ -40,6 +48,12 @@ __all__ = [
     "ModelProfileDeleteResult",
     "SettingEntryRead",
     "StoryCardRead",
+    "WorldRuleRead",
+    "CharacterProfileRead",
+    "StoryStateSnapshotRead",
+    "StoryEpisodeRead",
+    "CharacterKnowledgeStateRead",
+    "MemoryMaterializationRead",
     "ProjectVolumeRead",
     "SceneBeatRead",
     "ForeshadowingCardRead",

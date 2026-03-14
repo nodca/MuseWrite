@@ -12,10 +12,10 @@ function handleNextDialog(page: Page, handler: (dialog: Dialog) => Promise<void>
 
 async function openAssistantDrawer(page: Page): Promise<Locator> {
   await page.goto("/");
-  await page.getByRole("button", { name: "助手抽屉" }).click();
+  await page.getByRole("button", { name: "写作助手" }).click();
 
   const drawer = page.locator("#assistant-drawer");
-  await expect(drawer).toHaveAttribute("aria-hidden", "false");
+  await expect(drawer).toBeVisible();
   return drawer;
 }
 
@@ -124,19 +124,20 @@ test.describe("session management regression", () => {
 
   test("assistant tools tabs toggle without regression", async ({ page }) => {
     const drawer = await openAssistantDrawer(page);
+    await drawer.getByRole("tab", { name: "对话" }).click();
 
     const actionsTab = drawer.getByRole("button", { name: "动作提议" });
     const candidatesTab = drawer.getByRole("button", { name: "候选审核" });
 
-    await expect(actionsTab).toHaveClass(/\bactive\b/);
-    await expect(candidatesTab).not.toHaveClass(/\bactive\b/);
+    await expect(actionsTab).toHaveClass(/bg-accent-primary/);
+    await expect(candidatesTab).not.toHaveClass(/bg-accent-primary/);
 
     await candidatesTab.click();
-    await expect(candidatesTab).toHaveClass(/\bactive\b/);
-    await expect(actionsTab).not.toHaveClass(/\bactive\b/);
+    await expect(candidatesTab).toHaveClass(/bg-accent-primary/);
+    await expect(actionsTab).not.toHaveClass(/bg-accent-primary/);
 
     await actionsTab.click();
-    await expect(actionsTab).toHaveClass(/\bactive\b/);
-    await expect(candidatesTab).not.toHaveClass(/\bactive\b/);
+    await expect(actionsTab).toHaveClass(/bg-accent-primary/);
+    await expect(candidatesTab).not.toHaveClass(/bg-accent-primary/);
   });
 });

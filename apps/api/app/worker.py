@@ -10,6 +10,13 @@ from sqlmodel import Session, select
 from app.core.config import settings
 from app.core.database import engine, init_db
 from app.models.chat import ChatAction, ProjectMutationVersion
+from app.services.book_memory import run_book_memory_consolidation
+from app.services.book_memory.consolidation_queue import (
+    complete_book_memory_consolidation_job,
+    dequeue_book_memory_consolidation_job,
+    fail_book_memory_consolidation_job,
+    retry_book_memory_consolidation_job,
+)
 from app.services.chat_service import (
     create_action_audit_log,
     process_graph_sync_for_action,
@@ -618,6 +625,48 @@ def _requeue_entity_merge_scan_job(job: dict[str, Any], attempt: int, error: str
     fail_entity_merge_scan_job(job, error=error or "retry_reschedule_failed")
 
 
+def _process_book_memory_consolidation_job(job: dict[str, Any]) -> tuple[str, int, str]:
+    attempt = _as_int(job.get("attempt"), 0)
+    project_id = _as_int(job.get("project_id"), 0)
+    chapter_id = _as_int(job.get("chapter_id"), 0)
+    scene_beat_id = _as_int(job.get("scene_beat_id"), 0) or None
+    operator_id = str(job.get("operator_id") or "system-book-memory")
+    reason = str(job.get("reason") or "book_memory_consolidation")
+    if project_id <= 0 or chapter_id <= 0:
+        return "drop_invalid", attempt, "project_or_chapter_invalid"
+
+    with Session(engine) as db:
+        with _project_advisory_lock(db, project_id) as locked:
+            if not locked:
+                return "retry_locked", attempt, "project_lock_busy"
+            report = run_book_memory_consolidation(
+                db,
+                project_id=project_id,
+                chapter_id=chapter_id,
+                operator_id=operator_id,
+                reason=reason,
+                scene_beat_id=scene_beat_id,
+            )
+            return "ok", attempt, str(report.get("status") or "ok")
+
+
+def _requeue_book_memory_consolidation_job(job: dict[str, Any], attempt: int, error: str) -> None:
+    max_retries = max(_as_int(job.get("max_retries"), 2), 0)
+    if attempt >= max_retries:
+        fail_book_memory_consolidation_job(job, error=error or "max_retries_exceeded")
+        return
+
+    rescheduled = retry_book_memory_consolidation_job(
+        job,
+        next_attempt=attempt + 1,
+        delay_seconds=15,
+        error=error or "retry_scheduled",
+    )
+    if rescheduled:
+        return
+    fail_book_memory_consolidation_job(job, error=error or "retry_reschedule_failed")
+
+
 def _process_consistency_audit_job(job: dict[str, Any]) -> tuple[str, int, str]:
     attempt = _as_int(job.get("attempt"), 0)
     project_id = _as_int(job.get("project_id"), 0)
@@ -732,6 +781,7 @@ def run() -> None:
     init_db()
     graph_block_seconds = max(int(settings.graph_sync_worker_block_seconds), 1)
     entity_merge_block_seconds = max(int(settings.entity_merge_scan_worker_block_seconds), 1)
+    book_memory_block_seconds = max(int(settings.entity_merge_scan_worker_block_seconds), 1)
     consistency_audit_block_seconds = max(int(settings.consistency_audit_worker_block_seconds), 1)
     consistency_audit_scheduler_interval = max(float(settings.consistency_audit_scheduler_interval_seconds), 10.0)
     cleanup_interval_seconds = max(float(settings.job_cleanup_interval_seconds), 5.0)
@@ -826,6 +876,30 @@ def run() -> None:
                 _requeue_entity_merge_scan_job(merge_job, merge_attempt, merge_error)
             else:
                 complete_entity_merge_scan_job(merge_job, final_status="done", error="")
+
+        book_memory_job = dequeue_book_memory_consolidation_job(
+            1 if processed else book_memory_block_seconds,
+            worker_id="book-memory-worker",
+        )
+        if book_memory_job:
+            processed = True
+            try:
+                book_memory_result, book_memory_attempt, book_memory_error = _process_book_memory_consolidation_job(
+                    book_memory_job
+                )
+            except Exception as exc:
+                book_memory_result = "retry_error"
+                book_memory_attempt = _as_int(book_memory_job.get("attempt"), 0)
+                book_memory_error = str(exc)
+
+            if book_memory_result in {"retry_error", "retry_locked"}:
+                _requeue_book_memory_consolidation_job(
+                    book_memory_job,
+                    book_memory_attempt,
+                    book_memory_error,
+                )
+            else:
+                complete_book_memory_consolidation_job(book_memory_job, final_status="done", error="")
 
         consistency_job = dequeue_consistency_audit_job(
             1 if processed else consistency_audit_block_seconds,

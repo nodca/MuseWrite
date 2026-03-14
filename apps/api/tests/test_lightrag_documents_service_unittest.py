@@ -10,10 +10,6 @@ class LightRAGDocumentsServiceTestCase(unittest.TestCase):
         self._snapshot = {
             "lightrag_enabled": settings.lightrag_enabled,
             "lightrag_base_url": settings.lightrag_base_url,
-            "lightrag_documents_text_path": settings.lightrag_documents_text_path,
-            "lightrag_documents_paginated_path": settings.lightrag_documents_paginated_path,
-            "lightrag_documents_delete_path": settings.lightrag_documents_delete_path,
-            "lightrag_documents_pipeline_status_path": settings.lightrag_documents_pipeline_status_path,
         }
         settings.lightrag_enabled = True
         settings.lightrag_base_url = "http://lightrag.local"

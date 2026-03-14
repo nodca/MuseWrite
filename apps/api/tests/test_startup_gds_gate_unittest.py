@@ -87,7 +87,8 @@ class StartupGdsGateTestCase(unittest.TestCase):
         settings.neo4j_gds_required = True
 
         with mock.patch("app.services.runtime_guards.ensure_neo4j_gds_available", return_value={"status": "ok"}) as probe:
-            runtime_guards_module.assert_required_runtime_dependencies()
+            with mock.patch("app.services.runtime_guards.ensure_lightrag_available", return_value=True):
+                runtime_guards_module.assert_required_runtime_dependencies()
 
         probe.assert_called_once_with(raise_on_error=True)
 

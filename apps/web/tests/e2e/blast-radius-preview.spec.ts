@@ -312,24 +312,19 @@ async function installMockChatApiWithBlastRadius(
 
 async function openAssistantDrawer(page: Page): Promise<Locator> {
   await page.goto("/");
-  const switchToProMode = page.getByRole("button", { name: "切到工作台模式" });
-  if (await switchToProMode.isVisible()) {
-    await switchToProMode.click();
-  }
-  await page.getByRole("button", { name: "助手抽屉" }).click();
+  await page.getByRole("button", { name: "写作助手" }).click();
   const drawer = page.locator("#assistant-drawer");
-  await expect(drawer).toHaveAttribute("aria-hidden", "false");
+  await expect(drawer).toBeVisible();
   return drawer;
 }
 
 async function sendPromptAndCloseDrawer(drawer: Locator, prompt: string): Promise<void> {
+  await drawer.getByRole("tab", { name: "对话" }).click();
   const composer = drawer.locator(".composer textarea");
   const sendButton = drawer.locator(".composer button");
   await composer.fill(prompt);
   await sendButton.click();
   await expect(sendButton).toHaveText("发送", { timeout: 10_000 });
-  await drawer.getByRole("button", { name: "关闭助手抽屉" }).click();
-  await expect(drawer).toHaveAttribute("aria-hidden", "true");
 }
 
 test.describe("blast radius preview regression", () => {
@@ -339,22 +334,22 @@ test.describe("blast radius preview regression", () => {
 
     await sendPromptAndCloseDrawer(drawer, "补完沈夜和白璃的关系");
 
-    const actionCard = page.locator(".action-card").filter({ hasText: `#${actionId}` }).first();
+    const actionCard = drawer.locator(".action-card").filter({ hasText: `#${actionId}` }).first();
     await expect(actionCard).toBeVisible({ timeout: 10_000 });
     await expect(actionCard).toContainText("爆炸半径：+1 节点 / ~1 节点 / +1 边");
 
     await actionCard.hover();
 
-    const blastRadiusPanel = page.locator(".blast-radius-panel");
+    const blastRadiusPanel = drawer.locator(".blast-radius-panel");
     await expect(blastRadiusPanel).toBeVisible();
     await expect(blastRadiusPanel).toContainText("动作爆炸半径");
     await expect(blastRadiusPanel).toContainText("沈夜");
     await expect(blastRadiusPanel).toContainText("白璃");
     await expect(blastRadiusPanel).toContainText("将为沈夜补全同盟关系。");
-    await expect.poll(async () => page.locator(".timeline-node.preview-update").count()).toBeGreaterThan(0);
-    await expect.poll(async () => page.locator(".timeline-node.preview-add.is-preview-ghost").count()).toBeGreaterThan(0);
-    await expect.poll(async () => page.locator(".timeline-edge.preview-add.is-preview-ghost").count()).toBeGreaterThan(0);
-    await expect.poll(async () => page.locator(".timeline-edge.is-dim").count()).toBeGreaterThan(0);
+    await expect.poll(async () => drawer.locator(".timeline-node.preview-update").count()).toBeGreaterThan(0);
+    await expect.poll(async () => drawer.locator(".timeline-node.preview-add.is-preview-ghost").count()).toBeGreaterThan(0);
+    await expect.poll(async () => drawer.locator(".timeline-edge.preview-add.is-preview-ghost").count()).toBeGreaterThan(0);
+    await expect.poll(async () => drawer.locator(".timeline-edge.is-dim").count()).toBeGreaterThan(0);
 
     await actionCard.getByRole("button", { name: "应用到项目" }).click();
     await expect(actionCard).toContainText("应用前总览");
@@ -438,22 +433,22 @@ test.describe("blast radius preview regression", () => {
 
     await sendPromptAndCloseDrawer(drawer, "替换沈夜与白璃的旧关系");
 
-    const actionCard = page.locator(".action-card").filter({ hasText: `#${actionId}` }).first();
+    const actionCard = drawer.locator(".action-card").filter({ hasText: `#${actionId}` }).first();
     await expect(actionCard).toBeVisible({ timeout: 10_000 });
     const applyButton = actionCard.getByRole("button", { name: "应用到项目" });
     await applyButton.scrollIntoViewIfNeeded();
     await applyButton.focus();
     await expect(applyButton).toBeFocused();
 
-    const blastRadiusPanel = page.locator(".blast-radius-panel");
+    const blastRadiusPanel = drawer.locator(".blast-radius-panel");
     await expect(blastRadiusPanel).toBeVisible();
     await expect(blastRadiusPanel).toContainText("-1 节点");
     await expect(blastRadiusPanel).toContainText("-1 边");
     await expect(blastRadiusPanel).toContainText("将移除旧同盟，并引入新的敌对关系。");
-    await expect.poll(async () => page.locator(".timeline-node.preview-delete").count()).toBeGreaterThan(0);
-    await expect.poll(async () => page.locator(".timeline-edge.preview-delete").count()).toBeGreaterThan(0);
+    await expect.poll(async () => drawer.locator(".timeline-node.preview-delete").count()).toBeGreaterThan(0);
+    await expect.poll(async () => drawer.locator(".timeline-edge.preview-delete").count()).toBeGreaterThan(0);
 
-    await page.getByRole("button", { name: "写作设置" }).focus();
+    await drawer.getByRole("tab", { name: "规划" }).focus();
     await expect(blastRadiusPanel).toBeHidden();
   });
 
@@ -499,18 +494,18 @@ test.describe("blast radius preview regression", () => {
 
     await sendPromptAndCloseDrawer(drawer, "删除过期设定旧盟约");
 
-    const actionCard = page.locator(".action-card").filter({ hasText: `#${actionId}` }).first();
+    const actionCard = drawer.locator(".action-card").filter({ hasText: `#${actionId}` }).first();
     await expect(actionCard).toBeVisible({ timeout: 10_000 });
     await expect(actionCard).toContainText("爆炸半径：此动作不会直接改写图谱关系，仅影响设定与索引生命周期。");
 
     await actionCard.hover();
 
-    const blastRadiusPanel = page.locator(".blast-radius-panel");
+    const blastRadiusPanel = drawer.locator(".blast-radius-panel");
     await expect(blastRadiusPanel).toBeVisible();
     await expect(blastRadiusPanel).toContainText("此动作不会直接改写图谱关系，仅影响设定与索引生命周期。");
     await expect(blastRadiusPanel).toContainText("仅锚点波及");
-    await expect(page.locator(".timeline-node.preview-add, .timeline-node.preview-update, .timeline-node.preview-delete")).toHaveCount(0);
-    await expect(page.locator(".timeline-edge.preview-add, .timeline-edge.preview-update, .timeline-edge.preview-delete")).toHaveCount(0);
+    await expect(drawer.locator(".timeline-node.preview-add, .timeline-node.preview-update, .timeline-node.preview-delete")).toHaveCount(0);
+    await expect(drawer.locator(".timeline-edge.preview-add, .timeline-edge.preview-update, .timeline-edge.preview-delete")).toHaveCount(0);
 
     await actionCard.getByRole("button", { name: "应用到项目" }).click();
     await expect(actionCard).toContainText("应用前总览");

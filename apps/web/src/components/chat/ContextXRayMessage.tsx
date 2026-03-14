@@ -40,7 +40,7 @@ export const ContextXRayMessage = memo(function ContextXRayMessage({
 
   return (
     <>
-      <pre className="context-xray-message">
+      <pre className="whitespace-pre-wrap break-words text-text-primary text-sm font-sans">
         {segments.map((segment, index) => {
           if (segment.kind === "text") {
             return <span key={`text-${index}`}>{segment.text}</span>;
@@ -48,7 +48,7 @@ export const ContextXRayMessage = memo(function ContextXRayMessage({
           return (
             <span
               key={`token-${index}-${segment.text}`}
-              className="context-xray-token"
+              className="underline decoration-dotted decoration-accent-primary/40 underline-offset-2 cursor-help bg-accent-secondary/30 rounded-sm px-0.5 transition-colors hover:bg-accent-secondary/60"
               data-context-xray-source={segment.binding.source}
               tabIndex={0}
               onMouseEnter={(event) =>

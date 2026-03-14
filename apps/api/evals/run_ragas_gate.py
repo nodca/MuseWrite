@@ -5,6 +5,8 @@ import argparse
 import json
 import statistics
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -226,12 +228,16 @@ def _run_chat_stream(
     base_url: str,
     request_payload: dict[str, Any],
     timeout_seconds: int,
+    auth_token: str = "",
 ) -> tuple[str, dict[str, Any] | None]:
     url = base_url.rstrip("/") + "/api/chat/stream"
     answer_chunks: list[str] = []
     evidence_event: dict[str, Any] | None = None
+    headers: dict[str, str] = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
 
-    with httpx.Client(timeout=httpx.Timeout(timeout_seconds)) as client:
+    with httpx.Client(timeout=httpx.Timeout(timeout_seconds), headers=headers) as client:
         with client.stream("POST", url, json=request_payload) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -251,6 +257,66 @@ def _run_chat_stream(
     return "".join(answer_chunks).strip(), evidence_event
 
 
+def _run_single_sample(
+    *,
+    idx: int,
+    total: int,
+    row: dict[str, Any],
+    base_url: str,
+    timeout_seconds: int,
+    auth_token: str,
+    rag_mode: str,
+    deterministic_first: bool,
+    model: str,
+    print_lock: threading.Lock,
+) -> dict[str, Any] | None:
+    """Process one eval row. Returns sample dict or None on skip/error."""
+    project_id = int(row.get("project_id", 1))
+    question = str(row.get("question") or "").strip()
+    ground_truth = str(row.get("ground_truth") or "").strip()
+    if not question or not ground_truth:
+        with print_lock:
+            print(f"[eval] skip row#{idx}: question/ground_truth required")
+        return None
+    pov_mode = str(row.get("pov_mode") or "global").strip().lower() or "global"
+    pov_anchor = row.get("pov_anchor") or None
+    subset = _resolve_subset(row)
+    payload: dict[str, Any] = {
+        "project_id": project_id,
+        "content": question,
+        "session_id": None,
+        "model": model or None,
+        "pov_mode": pov_mode,
+        "pov_anchor": pov_anchor,
+        "rag_mode": rag_mode,
+        "deterministic_first": bool(deterministic_first),
+    }
+    with print_lock:
+        print(f"[eval] ({idx}/{total}) project={project_id} q={question}")
+    try:
+        answer, evidence = _run_chat_stream(
+            base_url=base_url,
+            request_payload=payload,
+            timeout_seconds=timeout_seconds,
+            auth_token=auth_token,
+        )
+    except Exception as exc:
+        with print_lock:
+            print(f"[eval] request failed row#{idx}: {exc}")
+        raise
+    contexts = _collect_contexts(evidence)
+    return {
+        "id": row.get("id"),
+        "question": question,
+        "answer": answer,
+        "contexts": contexts,
+        "ground_truth": ground_truth,
+        "subset": subset,
+        "pov_mode": pov_mode,
+        "pov_anchor": pov_anchor,
+    }
+
+
 def _build_eval_dataset(samples: list[dict[str, Any]]) -> Any:
     from datasets import Dataset
 
@@ -265,11 +331,27 @@ def _build_eval_dataset(samples: list[dict[str, Any]]) -> Any:
 
 
 def _evaluate_with_ragas(dataset: Any) -> tuple[dict[str, float], float, list[dict[str, Any]]]:
+    import os
     from ragas import evaluate
     from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
+    from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
+    llm = ChatOpenAI(
+        model=os.getenv("RAGAS_LLM_MODEL", "deepseek-ai/DeepSeek-V3.2"),
+        openai_api_key=os.getenv("RAGAS_LLM_API_KEY", os.getenv("OPENAI_API_KEY", "")),
+        openai_api_base=os.getenv("RAGAS_LLM_BASE_URL", os.getenv("OPENAI_BASE_URL", "")),
+        temperature=0,
+        n=1,
+        request_timeout=120,
+    )
+    embeddings = OpenAIEmbeddings(
+        model=os.getenv("RAGAS_EMBEDDING_MODEL", "BAAI/bge-m3"),
+        openai_api_key=os.getenv("RAGAS_EMBEDDING_API_KEY", "sk-6xkL2Hup3LtSOBsCeyhH4pQwF0wsfBVK29VxHj6p1H7EYydg"),
+        openai_api_base=os.getenv("RAGAS_EMBEDDING_BASE_URL", "https://router.tumuer.me/v1"),
+    )
 
     metrics = [faithfulness, answer_relevancy, context_precision, context_recall]
-    result = evaluate(dataset=dataset, metrics=metrics, raise_exceptions=False)
+    result = evaluate(dataset=dataset, metrics=metrics, llm=llm, embeddings=embeddings, raise_exceptions=False)
     frame = result.to_pandas()
     ragas_rows = frame.to_dict(orient="records")
 
@@ -343,6 +425,8 @@ def main() -> int:
         default=str(Path(__file__).parent / "out" / "ragas-report.json"),
         help="output report path",
     )
+    parser.add_argument("--auth-token", default="", help="Bearer token for API authentication")
+    parser.add_argument("--concurrency", type=int, default=1, help="Number of parallel sample requests")
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset).resolve()
@@ -355,52 +439,47 @@ def main() -> int:
         return 2
 
     samples: list[dict[str, Any]] = []
-    for idx, row in enumerate(rows, start=1):
-        project_id = int(row.get("project_id", 1))
-        question = str(row.get("question") or "").strip()
-        ground_truth = str(row.get("ground_truth") or "").strip()
-        if not question or not ground_truth:
-            print(f"[eval] skip row#{idx}: question/ground_truth required")
-            continue
-        pov_mode = str(row.get("pov_mode") or "global").strip().lower() or "global"
-        pov_anchor = row.get("pov_anchor") or None
-        subset = _resolve_subset(row)
+    concurrency = max(int(args.concurrency), 1)
+    print_lock = threading.Lock()
 
-        payload: dict[str, Any] = {
-            "project_id": project_id,
-            "content": question,
-            "session_id": None,
-            "model": args.model or None,
-            "pov_mode": pov_mode,
-            "pov_anchor": pov_anchor,
-            "rag_mode": args.rag_mode,
-            "deterministic_first": bool(args.deterministic_first),
-        }
+    valid_rows = [
+        (idx, row)
+        for idx, row in enumerate(rows, start=1)
+        if str(row.get("question") or "").strip() and str(row.get("ground_truth") or "").strip()
+    ]
 
-        print(f"[eval] ({idx}/{len(rows)}) project={project_id} q={question}")
-        try:
-            answer, evidence = _run_chat_stream(
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(
+                _run_single_sample,
+                idx=idx,
+                total=len(rows),
+                row=row,
                 base_url=args.base_url,
-                request_payload=payload,
                 timeout_seconds=args.timeout_seconds,
-            )
-        except Exception as exc:
-            print(f"[eval] request failed row#{idx}: {exc}")
-            return 3
+                auth_token=args.auth_token,
+                rag_mode=args.rag_mode,
+                deterministic_first=bool(args.deterministic_first),
+                model=args.model,
+                print_lock=print_lock,
+            ): idx
+            for idx, row in valid_rows
+        }
+        results: dict[int, dict[str, Any]] = {}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                sample = future.result()
+            except Exception as exc:
+                print(f"[eval] request failed row#{idx}: {exc}")
+                return 3
+            if sample is not None:
+                results[idx] = sample
 
-        contexts = _collect_contexts(evidence)
-        samples.append(
-            {
-                "id": row.get("id"),
-                "question": question,
-                "answer": answer,
-                "contexts": contexts,
-                "ground_truth": ground_truth,
-                "subset": subset,
-                "pov_mode": pov_mode,
-                "pov_anchor": pov_anchor,
-            }
-        )
+    # Restore original row order
+    for idx, _ in valid_rows:
+        if idx in results:
+            samples.append(results[idx])
 
     if not samples:
         print("[eval] no valid samples")

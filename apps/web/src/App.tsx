@@ -1,14 +1,9 @@
-import { Suspense, lazy, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Extension } from "@tiptap/core";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import Placeholder from "@tiptap/extension-placeholder";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { buildDiffSuggestions, SemanticDiffExtension } from "./components/editor/extensions/DiffExtension";
-import { GhostTextExtension } from "./components/editor/extensions/GhostTextExtension";
 import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { FixedSizeList, type ListChildComponentProps } from "react-window";
 import { useShallow } from "zustand/react/shallow";
 import {
   createForeshadowingCard,
@@ -22,10 +17,8 @@ import {
   deleteSceneBeat,
   deleteProjectChapter,
   decideAction,
-  generateGhostPolish,
-  generateGhostExpand,
-  openGhostTextSocket,
-  sendGhostTextStreamRequest,
+  polishSelection,
+  expandSelection,
   getActionLogs,
   getForeshadowingCards,
   getProjectConsistencyAudits,
@@ -61,17 +54,11 @@ import {
   type ChatStreamTimingMetrics,
 } from "./api/chatApi";
 import { useChatStore } from "./store/chatStore";
-import { ModeSwitch } from "./components/ModeSwitch";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { ContextXRayMessage } from "./components/chat/ContextXRayMessage";
-import {
-  extractAliasesFromRecord,
-  extractNameCandidatesFromRecord,
-  normalizeEntityToken,
-  summarizeKnowledgeSnippet,
-} from "./components/chat/contextXRay";
+import { DraftWorkspacePanel } from "./components/DraftWorkspacePanel";
 import { toUiMessage } from "./components/chat/messageMapping";
-import type { WorkbenchPanelVisibility } from "./components/ProWorkspaceMode";
+import { StoryPlanningPanel, type StoryPlanningPanelProps } from "./components/StoryPlanningPanel";
+import { DebugSnapshotGrid, GraphCandidateReviewPanel, PromptWorkshopPanel } from "./debugPanels";
 import {
   clearDraftRecoverySnapshot,
   readDraftRecoverySnapshot,
@@ -80,6 +67,7 @@ import {
 } from "./hooks/useDraftWorkspaceFlow";
 import { useAssistantSessionFlow } from "./hooks/useAssistantSessionFlow";
 import { useTimelineGraphFlow } from "./hooks/useTimelineGraphFlow";
+import { useSettingsStorage } from "./hooks/useSettingsStorage";
 import type {
   ActionAuditLog,
   ChatAction,
@@ -88,7 +76,6 @@ import type {
   DraftAutoSaveState,
   EvidencePayload,
   ForeshadowingCard,
-  GhostTextStreamEvent,
   GraphBlastRadiusPreview,
   GraphTimelineSnapshot,
   ChatSessionSummary,
@@ -103,6 +90,28 @@ import type {
   StoryCard,
   UiMessage,
 } from "./types";
+
+// --- Extracted modules ---
+import { formatRole, formatJson, formatDateTime, isSameLocalDate, toFiniteNumber, computePercentile, formatMs, formatPercent, normalizeEditorText, parseReferenceProjectIds } from "./utils/formatting";
+import { toEditorDoc, readEditorText, readSelectedText } from "./lib/editorHelpers";
+import { entityHintPluginKey, collectEntityHighlightHints, EntityInlineHintExtension, collectAwarenessTags } from "./lib/entityHighlight";
+import { isEntityMergeActionType, summarizeAction, safeToRecord } from "./lib/actionHelpers";
+import { normalizeGraphPreviewToken, buildGraphPreviewEdgeKey, getActionBlastRadius, summarizeBlastRadius, resolveBlastRadiusTone, buildBlastRadiusSummaryChips, formatBlastRadiusMarkdown } from "./lib/blastRadius";
+import { getFocusableElements, focusFirstDialogElement } from "./lib/focusTrap";
+import { BlastRadiusDetailDisclosure } from "./components/BlastRadiusDetailDisclosure";
+import { AssistantChatPanel } from "./components/AssistantChatPanel";
+import { ActionCard } from "./components/ActionCard";
+import { ActionLogsList } from "./components/ActionLogsList";
+import { ChapterOutlineList, CHAPTER_OUTLINE_ROW_HEIGHT, CHAPTER_OUTLINE_MAX_HEIGHT, CHAPTER_OUTLINE_OVERSCAN } from "./components/ChapterOutlineList";
+import type { ChapterOutlineEntry } from "./components/ChapterOutlineList";
+import { DraftRevisionList } from "./components/DraftRevisionList";
+import { TopBar } from "./components/TopBar";
+import { useTheme } from "./hooks/useTheme";
+import { SettingsDialog } from "./components/SettingsDialog";
+import type { WritingTheme } from "./components/SettingsDialog";
+import { AssistantActionsPanel } from "./components/AssistantActionsPanel";
+import type { StreamLatencySample, TokenUsageSample, RetrievalHitSample } from "./components/AssistantActionsPanel";
+import { AssistantDrawer } from "./components/AssistantDrawer";
 
 type PostChatSnapshotData = {
   messagesData: Awaited<ReturnType<typeof getSessionMessages>>;
@@ -156,3042 +165,29 @@ type PlanningSnapshotData = {
   overdue: ForeshadowingCard[];
 };
 
-type StreamLatencySample = {
-  at: string;
-  completeMs: number;
-};
-
-type TokenUsageSample = {
-  at: string;
-  total: number;
-};
-
-type RetrievalHitSample = {
-  at: string;
-  dsl: number;
-  graph: number;
-  rag: number;
-};
-
 const POST_CHAT_SNAPSHOT_TTL_MS = 400;
-const CHAPTER_OUTLINE_ROW_HEIGHT = 106;
-const CHAPTER_OUTLINE_MAX_HEIGHT = 424;
-const CHAPTER_OUTLINE_OVERSCAN = 6;
 const ACTION_FLOW_GUIDE_SEEN_KEY = "novel-platform:action-flow-guide:seen:v1";
 const PERFORMANCE_SAMPLE_LIMIT = 60;
-type WritingTheme = "paper" | "wenkai" | "modern" | "contrast";
-
-function formatRole(role: UiMessage["role"]): string {
-  if (role === "user") return "你";
-  if (role === "assistant") return "助手";
-  return "系统";
-}
-
-function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
-}
-
-function formatDateTime(value?: string | null): string {
-  if (!value) return "未保存";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
-}
-
-function isSameLocalDate(value: string | null | undefined, anchorDate: Date): boolean {
-  if (!value) return false;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return false;
-  return (
-    parsed.getFullYear() === anchorDate.getFullYear() &&
-    parsed.getMonth() === anchorDate.getMonth() &&
-    parsed.getDate() === anchorDate.getDate()
-  );
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return null;
-}
-
-function computePercentile(values: number[], percentile: number): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((percentile / 100) * sorted.length) - 1));
-  return sorted[index];
-}
-
-function formatMs(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "--";
-  return `${Math.round(value)}ms`;
-}
-
-function formatPercent(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0%";
-  return `${Math.round(value)}%`;
-}
-
-function normalizeEditorText(value: string): string {
-  const normalized = (value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u00a0/g, " ");
-  if (normalized.endsWith("\n")) {
-    return normalized.slice(0, -1);
-  }
-  return normalized;
-}
-
-function takeGhostWord(value: string): string {
-  const normalized = String(value || "");
-  if (!normalized.trim()) return "";
-  const match = normalized.match(/^\s*\S+\s*/);
-  return match ? match[0] : normalized;
-}
-
-function toEditorDoc(text: string): JSONContent {
-  const normalized = normalizeEditorText(text);
-  const lines = normalized.length > 0 ? normalized.split("\n") : [""];
-  return {
-    type: "doc",
-    content: lines.map((line) => {
-      if (!line) {
-        return { type: "paragraph" };
-      }
-      return {
-        type: "paragraph",
-        content: [{ type: "text", text: line }],
-      };
-    }),
-  };
-}
-
-function readEditorText(editor: Editor): string {
-  return normalizeEditorText(editor.getText({ blockSeparator: "\n" }));
-}
-
-function readSelectedText(editor: Editor): string {
-  const { from, to, empty } = editor.state.selection;
-  if (empty) return "";
-  const content = editor.state.doc.textBetween(from, to, "\n", "\n");
-  return normalizeEditorText(content).trim();
-}
-
-function parseReferenceProjectIds(value: string, currentProjectId: number): number[] {
-  const tokens = (value || "")
-    .split(/[,\s]+/)
-    .map((item) => Number(item))
-    .filter((item) => Number.isFinite(item) && item > 0 && item !== currentProjectId);
-  const deduped = Array.from(new Set(tokens));
-  return deduped.slice(0, 5);
-}
-
-type EntityHighlightHint = {
-  token: string;
-  canonical: string;
-  summary: string;
+type WorkbenchPanelVisibility = {
+  actions: boolean;
+  prompt: boolean;
+  planning: boolean;
+  snapshot: boolean;
 };
 
-type EntityHintPluginState = {
-  hints: EntityHighlightHint[];
-  regex: RegExp | null;
-  hintMap: Map<string, EntityHighlightHint>;
-  decorations: DecorationSet;
+const WORKBENCH_PANEL_LABELS: Record<keyof WorkbenchPanelVisibility, string> = {
+  actions: "动作提议 + 图谱",
+  prompt: "Prompt + 知识库",
+  planning: "结构化规划",
+  snapshot: "检索快照",
 };
 
-const ENTITY_HINT_LIMIT = 120;
-const entityHintPluginKey = new PluginKey<EntityHintPluginState>("entity-inline-hints");
-
-function collectEntityHighlightHints(settingsList: SettingEntry[], cardsList: StoryCard[]): EntityHighlightHint[] {
-  const hints: EntityHighlightHint[] = [];
-  const seen = new Set<string>();
-
-  const pushHint = (token: string, canonical: string, summary: string) => {
-    const trimmedToken = String(token || "").trim();
-    const canonicalText = String(canonical || "").trim();
-    if (!trimmedToken || !canonicalText) return;
-    const normalized = normalizeEntityToken(trimmedToken);
-    if (normalized.length < 2 || seen.has(normalized)) return;
-    seen.add(normalized);
-    hints.push({
-      token: trimmedToken,
-      canonical: canonicalText,
-      summary,
-    });
-  };
-
-  settingsList.forEach((item) => {
-    const canonical = item.key.trim();
-    const summary = summarizeKnowledgeSnippet(item.value);
-    pushHint(canonical, canonical, summary);
-    const valueObj = item.value && typeof item.value === "object" ? (item.value as Record<string, unknown>) : {};
-    extractNameCandidatesFromRecord(valueObj).forEach((name) => pushHint(name, canonical, summary));
-    extractAliasesFromRecord(valueObj).forEach((alias) => pushHint(alias, canonical, summary));
-  });
-
-  cardsList.forEach((card) => {
-    const canonical = (card.title || "").trim();
-    if (!canonical) return;
-    const summary = summarizeKnowledgeSnippet(card.content);
-    pushHint(canonical, canonical, summary);
-    const contentObj =
-      card.content && typeof card.content === "object" ? (card.content as Record<string, unknown>) : {};
-    extractNameCandidatesFromRecord(contentObj).forEach((name) => pushHint(name, canonical, summary));
-    extractAliasesFromRecord(contentObj).forEach((alias) => pushHint(alias, canonical, summary));
-  });
-
-  return hints.slice(0, ENTITY_HINT_LIMIT);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function buildEntityHintLookup(hints: EntityHighlightHint[]): {
-  regex: RegExp | null;
-  hintMap: Map<string, EntityHighlightHint>;
-} {
-  const hintMap = new Map<string, EntityHighlightHint>();
-  const tokens: string[] = [];
-  hints.forEach((item) => {
-    const token = item.token.trim();
-    if (!token) return;
-    const lookupKey = token.toLowerCase();
-    if (!hintMap.has(lookupKey)) {
-      hintMap.set(lookupKey, item);
-      tokens.push(token);
-    }
-  });
-  if (tokens.length === 0) {
-    return { regex: null, hintMap };
-  }
-  const pattern = tokens
-    .sort((a, b) => b.length - a.length)
-    .map((token) => escapeRegExp(token))
-    .join("|");
-  try {
-    return {
-      regex: new RegExp(pattern, "giu"),
-      hintMap,
-    };
-  } catch {
-    return { regex: null, hintMap };
-  }
-}
-
-function buildEntityDecorations(
-  doc: ProseMirrorNode,
-  regex: RegExp | null,
-  hintMap: Map<string, EntityHighlightHint>
-): DecorationSet {
-  if (!regex || hintMap.size === 0) {
-    return DecorationSet.empty;
-  }
-  const decorations: Decoration[] = [];
-  doc.descendants((node, pos) => {
-    if (!node.isText || !node.text) return;
-    const text = node.text;
-    regex.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = regex.exec(text)) !== null) {
-      const matched = match[0];
-      if (!matched) {
-        regex.lastIndex += 1;
-        continue;
-      }
-      const from = pos + match.index;
-      const to = from + matched.length;
-      if (to <= from) continue;
-
-      const hint = hintMap.get(matched.toLowerCase()) ?? hintMap.get(matched);
-      if (!hint) continue;
-      const title = hint.summary ? `${hint.canonical}：${hint.summary}` : hint.canonical;
-      decorations.push(
-        Decoration.inline(from, to, {
-          class: "entity-inline-hint",
-          "aria-label": title,
-          "data-entity-canonical": hint.canonical,
-          "data-entity-tooltip": title,
-        })
-      );
-    }
-  });
-  return DecorationSet.create(doc, decorations);
-}
-
-const EntityInlineHintExtension = Extension.create({
-  name: "entityInlineHint",
-  addProseMirrorPlugins() {
-    return [
-      new Plugin<EntityHintPluginState>({
-        key: entityHintPluginKey,
-        state: {
-          init(_, state) {
-            const lookup = buildEntityHintLookup([]);
-            return {
-              hints: [],
-              regex: lookup.regex,
-              hintMap: lookup.hintMap,
-              decorations: buildEntityDecorations(state.doc, lookup.regex, lookup.hintMap),
-            };
-          },
-          apply(tr, value, _oldState, newState) {
-            const meta = tr.getMeta(entityHintPluginKey);
-            let hints = value.hints;
-            let regex = value.regex;
-            let hintMap = value.hintMap;
-            let shouldRebuild = tr.docChanged;
-
-            if (Array.isArray(meta)) {
-              hints = meta
-                .filter((item): item is EntityHighlightHint => {
-                  if (!item || typeof item !== "object") return false;
-                  const record = item as Record<string, unknown>;
-                  return (
-                    typeof record.token === "string" &&
-                    typeof record.canonical === "string" &&
-                    typeof record.summary === "string"
-                  );
-                })
-                .slice(0, ENTITY_HINT_LIMIT);
-              const lookup = buildEntityHintLookup(hints);
-              regex = lookup.regex;
-              hintMap = lookup.hintMap;
-              shouldRebuild = true;
-            }
-
-            if (!shouldRebuild) {
-              return value;
-            }
-
-            return {
-              hints,
-              regex,
-              hintMap,
-              decorations: buildEntityDecorations(newState.doc, regex, hintMap),
-            };
-          },
-        },
-        props: {
-          decorations(state) {
-            const pluginState = entityHintPluginKey.getState(state);
-            return pluginState?.decorations ?? DecorationSet.empty;
-          },
-        },
-      }),
-    ];
-  },
-});
-
-function normalizeAwarenessTag(value: string): string {
-  const cleaned = value
-    .replace(/^[#\[\(【]+/, "")
-    .replace(/[\]\)】]+$/, "")
-    .trim();
-  if (!cleaned) return "";
-  return cleaned.replace(/\s+/g, " ").slice(0, 24);
-}
-
-function collectAwarenessTags(
-  evidence: EvidencePayload | null,
-  options: { includeDebugSignals: boolean }
-): string[] {
-  const { includeDebugSignals } = options;
-  if (!evidence) return [];
-  const tags: string[] = [];
-  const seen = new Set<string>();
-
-  const pushTag = (raw: string | null | undefined) => {
-    const cleaned = normalizeAwarenessTag(String(raw || ""));
-    if (!cleaned || cleaned.length < 2 || seen.has(cleaned)) return;
-    seen.add(cleaned);
-    tags.push(cleaned);
-  };
-
-  pushTag(evidence.policy.anchor);
-  evidence.sources.dsl.slice(0, 3).forEach((item) => pushTag(item.title));
-  evidence.sources.graph.slice(0, 3).forEach((item) => {
-    pushTag(item.title);
-    if (includeDebugSignals) {
-      pushTag(item.fact);
-    }
-  });
-  evidence.sources.rag.slice(0, 2).forEach((item) => pushTag(item.title));
-  return tags.slice(0, includeDebugSignals ? 8 : 5);
-}
-
-function isEntityMergeActionType(actionType: string): boolean {
-  const normalized = (actionType || "").trim().toLowerCase().replace(/[_-]/g, ".");
-  return normalized.startsWith("entity.merge") || normalized.startsWith("graph.entity.merge");
-}
-
-type ActionIntent = "create" | "update" | "delete";
-
-function resolveActionIntent(actionType: string): ActionIntent {
-  const normalized = (actionType || "").trim().toLowerCase();
-  if (normalized.includes("delete")) return "delete";
-  if (normalized.includes("create")) return "create";
-  return "update";
-}
-
-function resolveActionIntentLabel(intent: ActionIntent): string {
-  if (intent === "create") return "创建";
-  if (intent === "delete") return "删除";
-  return "修改";
-}
-
-function resolveActionStatusLabel(status: string): string {
-  const normalized = (status || "").trim().toLowerCase();
-  if (normalized === "proposed") return "AI 建议";
-  if (normalized === "applied" || normalized === "confirmed") return "已应用";
-  if (normalized === "undone") return "已撤销";
-  if (normalized === "rejected") return "已忽略";
-  if (normalized === "failed") return "执行失败";
-  return status;
-}
-
-function collectEntityMergePayloadAliases(payload: Record<string, unknown>): string[] {
-  const rawItems: unknown[] = [];
-  for (const key of ["alias", "source_entity", "source_alias", "candidate_alias", "from_entity"]) {
-    const value = payload[key];
-    if (value !== undefined && value !== null) rawItems.push(value);
-  }
-  if (payload.aliases !== undefined && payload.aliases !== null) {
-    rawItems.push(payload.aliases);
-  }
-
-  const aliases: string[] = [];
-  const seen = new Set<string>();
-  for (const item of rawItems) {
-    if (typeof item === "string") {
-      const token = item.trim();
-      if (!token || seen.has(token)) continue;
-      seen.add(token);
-      aliases.push(token);
-      continue;
-    }
-    if (Array.isArray(item)) {
-      for (const entry of item) {
-        const token = typeof entry === "string" ? entry.trim() : "";
-        if (!token || seen.has(token)) continue;
-        seen.add(token);
-        aliases.push(token);
-      }
-    }
-  }
-  return aliases;
-}
-
-function summarizeAction(action: ChatAction): string[] {
-  const payload = action.payload ?? {};
-  if (isEntityMergeActionType(action.action_type)) {
-    const source =
-      typeof payload.source_entity === "string"
-        ? payload.source_entity
-        : typeof payload.alias === "string"
-          ? payload.alias
-          : "候选别名";
-    const target =
-      typeof payload.target_title === "string"
-        ? payload.target_title
-        : typeof payload.canonical_name === "string"
-          ? payload.canonical_name
-          : typeof payload.target_card_id === "number"
-            ? `卡片 #${payload.target_card_id}`
-            : typeof payload.card_id === "number"
-              ? `卡片 #${payload.card_id}`
-              : "目标实体";
-    return [`实体合并提案：将「${source}」并入「${target}」`];
-  }
-  if (action.action_type === "setting.upsert") {
-    const key = typeof payload.key === "string" ? payload.key : "未命名设定";
-    return [`更新设定：${key}`];
-  }
-  if (action.action_type === "setting.delete") {
-    const key = typeof payload.key === "string" ? payload.key : "未命名设定";
-    return [`删除设定：${key}`];
-  }
-  if (action.action_type === "card.create") {
-    const title = typeof payload.title === "string" ? payload.title : "未命名卡片";
-    return [`创建卡片：${title}`];
-  }
-  if (action.action_type === "card.update") {
-    const cardId = typeof payload.card_id === "number" ? payload.card_id : "未知";
-    const title = typeof payload.title === "string" ? `，新标题：${payload.title}` : "";
-    return [`更新卡片 #${cardId}${title}`];
-  }
-  return [`执行动作：${action.action_type}`];
-}
-
-function actionRiskHints(action: ChatAction): string[] {
-  const payload = action.payload ?? {};
-  const hints: string[] = [];
-  if (isEntityMergeActionType(action.action_type)) {
-    hints.push("该动作仅写入目标卡片 aliases，用于后续归一化；不会自动执行图谱硬合并。");
-    hints.push("请先确认是否存在身份反转剧情，避免过早绑定别名。");
-  }
-  if (action.action_type === "setting.delete") {
-    hints.push("删除后会立即影响检索与注入，但可通过动作回滚恢复。");
-  }
-  if (action.action_type === "card.update" && payload.merge === false) {
-    hints.push("覆盖式更新：可能替换掉卡片原有字段。");
-  }
-  if (action.action_type === "setting.upsert") {
-    const valueLength = JSON.stringify(payload.value ?? {}).length;
-    if (valueLength > 2000) {
-      hints.push("写入内容较大，可能增加检索与注入延迟。");
-    }
-  }
-  return hints;
-}
-
-type ActionDiffRow = {
-  field: string;
-  before: string;
-  after: string;
-  beforeTags?: string[];
-  afterTags?: string[];
-};
-
-function safeToRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-function normalizeGraphPreviewToken(value: string): string {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]+/g, "");
-}
-
-function buildGraphPreviewEdgeKey(source: string, relation: string, target: string): string {
-  const sourceToken = normalizeGraphPreviewToken(source);
-  const targetToken = normalizeGraphPreviewToken(target);
-  const relationToken = String(relation || "").trim().toUpperCase();
-  if (!sourceToken || !targetToken || !relationToken) return "";
-  return `${sourceToken}|${relationToken}|${targetToken}`;
-}
-
-function getActionBlastRadius(action: ChatAction | null | undefined): GraphBlastRadiusPreview | null {
-  const payload = safeToRecord(action?.payload);
-  const raw = safeToRecord(payload?._graph_blast_radius);
-  if (!raw) return null;
-
-  const nodes = (Array.isArray(raw.nodes) ? raw.nodes : [])
-    .map((item) => safeToRecord(item))
-    .filter((item): item is Record<string, unknown> => item !== null)
-    .map((item) => {
-      const label =
-        typeof item.label === "string"
-          ? item.label.trim()
-          : typeof item.id === "string"
-            ? item.id.trim()
-            : "";
-      const id =
-        typeof item.id === "string" && item.id.trim().length > 0
-          ? item.id.trim()
-          : label;
-      if (!id || !label) return null;
-      return {
-        id,
-        label,
-        change: typeof item.change === "string" ? item.change : "touch",
-        role: typeof item.role === "string" ? item.role : "related",
-        in_current_graph: Boolean(item.in_current_graph),
-      };
-    })
-    .filter((item): item is GraphBlastRadiusPreview["nodes"][number] => item !== null);
-
-  const edges = (Array.isArray(raw.edges) ? raw.edges : [])
-    .map((item) => safeToRecord(item))
-    .filter((item): item is Record<string, unknown> => item !== null)
-    .map((item) => {
-      const source = typeof item.source === "string" ? item.source.trim() : "";
-      const target = typeof item.target === "string" ? item.target.trim() : "";
-      const relation = typeof item.relation === "string" ? item.relation.trim().toUpperCase() : "";
-      const key =
-        typeof item.key === "string" && item.key.trim().length > 0
-          ? item.key.trim()
-          : buildGraphPreviewEdgeKey(source, relation, target);
-      if (!source || !target || !relation || !key) return null;
-      return {
-        key,
-        source,
-        target,
-        relation,
-        change: typeof item.change === "string" ? item.change : "add",
-        in_current_graph: Boolean(item.in_current_graph),
-      };
-    })
-    .filter((item): item is GraphBlastRadiusPreview["edges"][number] => item !== null);
-
-  const summaryWrap = safeToRecord(raw.summary);
-  const summaryNodes = safeToRecord(summaryWrap?.nodes) ?? {};
-  const summaryEdges = safeToRecord(summaryWrap?.edges) ?? {};
-
-  return {
-    source: typeof raw.source === "string" ? raw.source : "none",
-    action_type: typeof raw.action_type === "string" ? raw.action_type : String(action?.action_type || ""),
-    chapter_index:
-      typeof raw.chapter_index === "number"
-        ? raw.chapter_index
-        : typeof raw.chapter_index === "string" && raw.chapter_index.trim().length > 0
-          ? Number(raw.chapter_index)
-          : null,
-    nodes,
-    edges,
-    summary: {
-      nodes: Object.fromEntries(
-        Object.entries(summaryNodes).map(([key, value]) => [key, Number(value) || 0])
-      ),
-      edges: Object.fromEntries(
-        Object.entries(summaryEdges).map(([key, value]) => [key, Number(value) || 0])
-      ),
-    },
-    notes: Array.isArray(raw.notes)
-      ? raw.notes.map((item) => String(item || "").trim()).filter((item) => item.length > 0)
-      : [],
-  };
-}
-
-function summarizeBlastRadius(preview: GraphBlastRadiusPreview | null): string | null {
-  if (!preview) return null;
-  const nodeSummary = safeToRecord(preview.summary?.nodes) ?? {};
-  const edgeSummary = safeToRecord(preview.summary?.edges) ?? {};
-  const createNodes = Number(nodeSummary.create ?? 0) || 0;
-  const updateNodes = Number(nodeSummary.update ?? 0) || 0;
-  const deleteNodes = Number(nodeSummary.delete ?? 0) || 0;
-  const touchNodes = Number(nodeSummary.touch ?? 0) || 0;
-  const addEdges = Number(edgeSummary.add ?? 0) || 0;
-  const updateEdges = Number(edgeSummary.update ?? 0) || 0;
-  const deleteEdges = Number(edgeSummary.delete ?? 0) || 0;
-  const parts: string[] = [];
-  if (createNodes > 0) parts.push(`+${createNodes} 节点`);
-  if (updateNodes > 0) parts.push(`~${updateNodes} 节点`);
-  if (deleteNodes > 0) parts.push(`-${deleteNodes} 节点`);
-  if (touchNodes > 0) parts.push(`${touchNodes} 波及`);
-  if (addEdges > 0) parts.push(`+${addEdges} 边`);
-  if (updateEdges > 0) parts.push(`~${updateEdges} 边`);
-  if (deleteEdges > 0) parts.push(`-${deleteEdges} 边`);
-  if (parts.length > 0) return parts.join(" / ");
-  return preview.notes?.[0] ?? "当前动作不直接改写图谱关系";
-}
-
-function resolveBlastRadiusTone(change: string): "add" | "update" | "delete" {
-  const normalized = String(change || "").trim().toLowerCase();
-  if (normalized === "create" || normalized === "add") return "add";
-  if (normalized === "delete" || normalized === "remove") return "delete";
-  return "update";
-}
-
-function buildBlastRadiusSummaryChips(preview: GraphBlastRadiusPreview | null): Array<{
-  key: string;
-  tone: "add" | "update" | "delete";
-  label: string;
-}> {
-  if (!preview) return [];
-  const nodeSummary = safeToRecord(preview.summary?.nodes) ?? {};
-  const edgeSummary = safeToRecord(preview.summary?.edges) ?? {};
-  const chips: Array<{ key: string; tone: "add" | "update" | "delete"; label: string }> = [];
-  const nodeCreate = Number(nodeSummary.create ?? 0) || 0;
-  const nodeUpdate = (Number(nodeSummary.update ?? 0) || 0) + (Number(nodeSummary.touch ?? 0) || 0);
-  const nodeDelete = Number(nodeSummary.delete ?? 0) || 0;
-  const edgeAdd = Number(edgeSummary.add ?? 0) || 0;
-  const edgeUpdate = Number(edgeSummary.update ?? 0) || 0;
-  const edgeDelete = Number(edgeSummary.delete ?? 0) || 0;
-  if (nodeCreate > 0) chips.push({ key: "node-create", tone: "add", label: `+${nodeCreate} 节点` });
-  if (nodeUpdate > 0) chips.push({ key: "node-update", tone: "update", label: `~${nodeUpdate} 节点` });
-  if (nodeDelete > 0) chips.push({ key: "node-delete", tone: "delete", label: `-${nodeDelete} 节点` });
-  if (edgeAdd > 0) chips.push({ key: "edge-add", tone: "add", label: `+${edgeAdd} 边` });
-  if (edgeUpdate > 0) chips.push({ key: "edge-update", tone: "update", label: `~${edgeUpdate} 边` });
-  if (edgeDelete > 0) chips.push({ key: "edge-delete", tone: "delete", label: `-${edgeDelete} 边` });
-  return chips;
-}
-
-function formatBlastRadiusMarkdown(preview: GraphBlastRadiusPreview | null, title: string): string {
-  const heading = String(title || "").trim();
-  const lines: string[] = [];
-  if (heading) lines.push(`# ${heading}`);
-  if (!preview) {
-    lines.push("");
-    lines.push("（无图谱爆炸半径预览）");
-    return lines.join("\n");
-  }
-  const summary = summarizeBlastRadius(preview);
-  if (summary) lines.push(`- 摘要：${summary}`);
-  if (preview.action_type) lines.push(`- 动作：${preview.action_type}`);
-  if (preview.chapter_index !== null) lines.push(`- 章节：${preview.chapter_index}`);
-  if (preview.source) lines.push(`- 来源：${preview.source}`);
-  if (preview.notes?.[0]) lines.push(`- 备注：${preview.notes[0]}`);
-
-  lines.push("");
-  lines.push("## 节点");
-  if ((preview.nodes ?? []).length === 0) {
-    lines.push("- （无）");
-  } else {
-    preview.nodes.forEach((node) => {
-      const tone = resolveBlastRadiusTone(node.change);
-      const existsLabel = node.in_current_graph ? "已存在" : "投影";
-      const role = String(node.role || "related");
-      lines.push(`- [${tone}] ${node.label} (${role} · ${existsLabel})`);
-    });
-  }
-
-  lines.push("");
-  lines.push("## 边");
-  if ((preview.edges ?? []).length === 0) {
-    lines.push("- （无）");
-  } else {
-    preview.edges.forEach((edge) => {
-      const tone = resolveBlastRadiusTone(edge.change);
-      const existsLabel = edge.in_current_graph ? "已存在" : "投影";
-      lines.push(`- [${tone}] ${edge.source} -[${edge.relation}]-> ${edge.target} (${existsLabel})`);
-    });
-  }
-
-  return lines.join("\n");
-}
-
-type BlastRadiusDetailDisclosureProps = {
-  preview: GraphBlastRadiusPreview | null;
-  resetKey: unknown;
-  summaryLabel?: string;
-  className?: string;
-  maxNodes?: number;
-  maxEdges?: number;
-};
-
-const BlastRadiusDetailDisclosure = memo(function BlastRadiusDetailDisclosure({
-  preview,
-  resetKey,
-  summaryLabel = "查看明细",
-  className = "blast-radius-detail",
-  maxNodes = 80,
-  maxEdges = 120,
-}: BlastRadiusDetailDisclosureProps) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "add" | "update" | "delete">("all");
-
-  const nodeItems = preview?.nodes ?? [];
-  const edgeItems = preview?.edges ?? [];
-  const token = query.trim().toLowerCase();
-
-  const filteredNodes = useMemo(() => {
-    if (!token && filter === "all") return nodeItems;
-    return nodeItems.filter((item) => {
-      const tone = resolveBlastRadiusTone(item.change);
-      if (filter !== "all" && tone !== filter) return false;
-      if (!token) return true;
-      const label = String(item.label || item.id || "").toLowerCase();
-      const id = String(item.id || "").toLowerCase();
-      const role = String(item.role || "").toLowerCase();
-      return label.includes(token) || id.includes(token) || role.includes(token);
-    });
-  }, [filter, nodeItems, token]);
-
-  const filteredEdges = useMemo(() => {
-    if (!token && filter === "all") return edgeItems;
-    return edgeItems.filter((item) => {
-      const tone = resolveBlastRadiusTone(item.change);
-      if (filter !== "all" && tone !== filter) return false;
-      if (!token) return true;
-      const source = String(item.source || "").toLowerCase();
-      const target = String(item.target || "").toLowerCase();
-      const relation = String(item.relation || "").toLowerCase();
-      return source.includes(token) || target.includes(token) || relation.includes(token);
-    });
-  }, [edgeItems, filter, token]);
-
-  useEffect(() => {
-    setQuery("");
-    setFilter("all");
-    setOpen(false);
-  }, [resetKey]);
-
-  if (!preview) return null;
-
-  return (
-    <details className={className} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary>{summaryLabel}</summary>
-      <div className="blast-radius-detail-controls">
-        <label className="timeline-filter-field">
-          <span>检索</span>
-          <input
-            type="search"
-            placeholder="节点/关系/角色"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-        </label>
-        <label className="timeline-filter-field">
-          <span>变更</span>
-          <select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
-            <option value="all">全部</option>
-            <option value="add">新增</option>
-            <option value="update">更新/波及</option>
-            <option value="delete">删除</option>
-          </select>
-        </label>
-      </div>
-      <div className="blast-radius-detail-grid">
-        <section className="blast-radius-detail-section">
-          <div className="blast-radius-detail-head">
-            <strong>{`节点 ${filteredNodes.length}/${nodeItems.length}`}</strong>
-            <small>点击可复制标题</small>
-          </div>
-          <div className="blast-radius-detail-list">
-            {nodeItems.length === 0 ? <p className="empty">暂无节点变更</p> : null}
-            {nodeItems.length > 0 && filteredNodes.length === 0 ? <p className="empty">筛选后无节点命中</p> : null}
-            {filteredNodes.slice(0, maxNodes).map((item) => {
-              const tone = resolveBlastRadiusTone(item.change);
-              const existsLabel = item.in_current_graph ? "已存在" : "投影";
-              const roleLabel = String(item.role || "related");
-              return (
-                <button
-                  key={`${item.id}:${item.label}:${roleLabel}`}
-                  type="button"
-                  className={`blast-radius-detail-row tone-${tone}`}
-                  onClick={() => void navigator.clipboard?.writeText(item.label || item.id)}
-                >
-                  <span className="label">{item.label}</span>
-                  <small>{`${roleLabel} · ${existsLabel}`}</small>
-                </button>
-              );
-            })}
-            {filteredNodes.length > maxNodes ? (
-              <p className="empty">{`已截断展示明细：仅显示前 ${maxNodes} 条（当前命中 ${filteredNodes.length} 条）`}</p>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="blast-radius-detail-section">
-          <div className="blast-radius-detail-head">
-            <strong>{`边 ${filteredEdges.length}/${edgeItems.length}`}</strong>
-            <small>点击可复制三元组</small>
-          </div>
-          <div className="blast-radius-detail-list">
-            {edgeItems.length === 0 ? <p className="empty">暂无关系变更</p> : null}
-            {edgeItems.length > 0 && filteredEdges.length === 0 ? <p className="empty">筛选后无关系命中</p> : null}
-            {filteredEdges.slice(0, maxEdges).map((item) => {
-              const tone = resolveBlastRadiusTone(item.change);
-              const existsLabel = item.in_current_graph ? "已存在" : "投影";
-              const triple = `${item.source} -[${item.relation}]-> ${item.target}`;
-              return (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={`blast-radius-detail-row tone-${tone}`}
-                  onClick={() => void navigator.clipboard?.writeText(triple)}
-                >
-                  <span className="label">{triple}</span>
-                  <small>{existsLabel}</small>
-                </button>
-              );
-            })}
-            {filteredEdges.length > maxEdges ? (
-              <p className="empty">{`已截断展示明细：仅显示前 ${maxEdges} 条（当前命中 ${filteredEdges.length} 条）`}</p>
-            ) : null}
-          </div>
-        </section>
-      </div>
-    </details>
-  );
-});
-
-function diffValuePreview(value: unknown, maxLength = 220): string {
-  let serialized = "";
-  if (value === undefined) {
-    serialized = "（未设置）";
-  } else if (value === null) {
-    serialized = "null";
-  } else if (typeof value === "string") {
-    serialized = value;
-  } else {
-    serialized = formatJson(value);
-  }
-  const normalized = serialized.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) return normalized;
-  return `${normalized.slice(0, maxLength).trimEnd()}...`;
-}
-
-function parseAliasTags(value: string): string[] {
-  const raw = value.trim();
-  if (!raw) return [];
-
-  const collect = (items: unknown[]): string[] => {
-    const seen = new Set<string>();
-    const tags: string[] = [];
-    for (const item of items) {
-      const text = String(item ?? "").trim();
-      if (!text) continue;
-      if (seen.has(text)) continue;
-      seen.add(text);
-      tags.push(text);
-    }
-    return tags.slice(0, 24);
-  };
-
-  if (raw.startsWith("[") && raw.endsWith("]")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return collect(parsed);
-      }
-    } catch {
-      // noop
-    }
-  }
-
-  const normalized = raw
-    .replace(/^\[|\]$/g, "")
-    .replace(/["']/g, "")
-    .trim();
-  if (!normalized) return [];
-  return collect(normalized.split(/[,\n，、;；]+/));
-}
-
-function isAliasDiffField(field: string): boolean {
-  const normalized = field.trim().toLowerCase();
-  return (
-    normalized === "卡片.aliases" ||
-    normalized.endsWith(".aliases") ||
-    normalized.endsWith(".alias") ||
-    normalized.includes("别名")
-  );
-}
-
-function buildObjectDiffRows(
-  beforeObj: Record<string, unknown>,
-  afterObj: Record<string, unknown>,
-  prefix: string,
-  limit = 8
-): ActionDiffRow[] {
-  const keys = Array.from(new Set([...Object.keys(beforeObj), ...Object.keys(afterObj)])).sort();
-  const rows: ActionDiffRow[] = [];
-  for (const key of keys) {
-    const beforeText = diffValuePreview(beforeObj[key]);
-    const afterText = diffValuePreview(afterObj[key]);
-    if (beforeText === afterText) continue;
-    const aliasField = isAliasDiffField(`${prefix}.${key}`);
-    rows.push({
-      field: `${prefix}.${key}`,
-      before: beforeText,
-      after: afterText,
-      beforeTags: aliasField ? parseAliasTags(beforeText) : undefined,
-      afterTags: aliasField ? parseAliasTags(afterText) : undefined,
-    });
-    if (rows.length >= limit) break;
-  }
-  if (keys.length > limit) {
-    rows.push({
-      field: `${prefix}.*`,
-      before: "（更多字段已折叠）",
-      after: `共 ${keys.length} 个字段，请展开调试 JSON 查看完整内容`,
-    });
-  }
-  return rows;
-}
-
-function buildActionDiffRows(action: ChatAction): ActionDiffRow[] {
-  const payload = action.payload ?? {};
-  const undoPayload = action.undo_payload ?? {};
-  const applyResult = action.apply_result ?? {};
-
-  if (isEntityMergeActionType(action.action_type)) {
-    const beforeWrap = safeToRecord(undoPayload.before) ?? {};
-    const beforeAliases = Array.isArray(beforeWrap.aliases) ? beforeWrap.aliases : [];
-    const appliedAliases = Array.isArray(applyResult.aliases) ? applyResult.aliases : [];
-    const pendingAliases = collectEntityMergePayloadAliases(payload);
-    const afterAliases = appliedAliases.length > 0 ? appliedAliases : pendingAliases;
-    const target =
-      typeof payload.target_title === "string"
-        ? payload.target_title
-        : typeof applyResult.title === "string"
-          ? applyResult.title
-          : typeof payload.target_card_id === "number"
-            ? `卡片 #${payload.target_card_id}`
-            : "目标实体";
-
-    return [
-      {
-        field: "实体目标",
-        before: diffValuePreview(target),
-        after: diffValuePreview(target),
-      },
-      {
-        field: "卡片.aliases",
-        before: diffValuePreview(beforeAliases.length > 0 ? beforeAliases : "（应用时读取当前值）"),
-        after: diffValuePreview(afterAliases.length > 0 ? afterAliases : "（无候选别名）"),
-        beforeTags: beforeAliases.map((item) => String(item).trim()).filter((item) => item.length > 0),
-        afterTags: afterAliases.map((item) => String(item).trim()).filter((item) => item.length > 0),
-      },
-    ];
-  }
-
-  if (action.action_type === "setting.upsert") {
-    const key = typeof payload.key === "string" ? payload.key : "未命名设定";
-    const beforeWrap = safeToRecord(undoPayload.before);
-    const beforeValue = beforeWrap?.exists === true ? beforeWrap.value : "（新增设定）";
-    const afterValue = payload.value ?? payload.content ?? {};
-    return [
-      {
-        field: `设定.${key}`,
-        before: diffValuePreview(beforeValue),
-        after: diffValuePreview(afterValue),
-      },
-    ];
-  }
-
-  if (action.action_type === "setting.delete") {
-    const key = typeof payload.key === "string" ? payload.key : "未命名设定";
-    const beforeWrap = safeToRecord(undoPayload.before);
-    const beforeValue = beforeWrap?.exists === true ? beforeWrap.value : "（设定不存在）";
-    return [
-      {
-        field: `设定.${key}`,
-        before: diffValuePreview(beforeValue),
-        after: "（已删除）",
-      },
-    ];
-  }
-
-  if (action.action_type === "card.create") {
-    const title = typeof payload.title === "string" ? payload.title : "未命名卡片";
-    const content = safeToRecord(payload.content) ?? {};
-    return [
-      { field: "卡片.title", before: "（新建）", after: diffValuePreview(title) },
-      { field: "卡片.content", before: "（空）", after: diffValuePreview(content) },
-    ];
-  }
-
-  if (action.action_type === "card.update") {
-    const beforeWrap = safeToRecord(undoPayload.before) ?? {};
-    const beforeTitle = typeof beforeWrap.title === "string" ? beforeWrap.title : "";
-    const beforeContent = safeToRecord(beforeWrap.content) ?? {};
-    const patchContent = safeToRecord(payload.content) ?? {};
-    const merge = payload.merge !== false;
-    const afterContent = merge ? { ...beforeContent, ...patchContent } : patchContent;
-    const nextTitle = typeof payload.title === "string" ? payload.title : beforeTitle;
-
-    const rows: ActionDiffRow[] = [];
-    if (beforeTitle !== nextTitle) {
-      rows.push({
-        field: "卡片.title",
-        before: diffValuePreview(beforeTitle || "（空）"),
-        after: diffValuePreview(nextTitle || "（空）"),
-      });
-    }
-    rows.push(...buildObjectDiffRows(beforeContent, afterContent, "卡片.content"));
-    if (rows.length === 0) {
-      rows.push({
-        field: "卡片",
-        before: "（无显著变化）",
-        after: "（无显著变化）",
-      });
-    }
-    return rows;
-  }
-
-  return [
-    {
-      field: action.action_type,
-      before: "（未知）",
-      after: diffValuePreview(payload),
-    },
-  ];
-}
-
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "area[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
-
-function getFocusableElements(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => {
-    if (element.getAttribute("aria-hidden") === "true") return false;
-    if (element.hasAttribute("disabled")) return false;
-    if (element.tabIndex < 0) return false;
-    return element.getClientRects().length > 0;
-  });
-}
-
-function focusFirstDialogElement(container: HTMLElement): void {
-  const preferred = container.querySelector<HTMLElement>("[data-autofocus]");
-  if (preferred && !preferred.hasAttribute("disabled") && preferred.getClientRects().length > 0) {
-    preferred.focus();
-    return;
-  }
-  const firstField = container.querySelector<HTMLElement>(
-    "input:not([disabled]), select:not([disabled]), textarea:not([disabled])"
-  );
-  if (firstField) {
-    firstField.focus();
-    return;
-  }
-  const focusables = getFocusableElements(container);
-  if (focusables.length > 0) {
-    focusables[0].focus();
-    return;
-  }
-  container.focus();
-}
-
-type LazyPanelFallbackProps = {
-  title: string;
-  detail: string;
-  className?: string;
-};
-
-const LazyPanelFallback = memo(function LazyPanelFallback({ title, detail, className }: LazyPanelFallbackProps) {
-  return (
-    <section className={className ?? "panel"}>
-      <div className="panel-title">
-        <h2>{title}</h2>
-        <small>加载中...</small>
-      </div>
-      <p className="empty">{detail}</p>
-    </section>
-  );
-});
-
-const LazyGraphCandidateReviewPanel = lazy(async () => {
-  const module = await import("./debugPanels");
-  return { default: module.GraphCandidateReviewPanel };
-});
-
-const LazyWritingWorkspaceMode = lazy(async () => {
-  const module = await import("./components/WritingWorkspaceMode");
-  return { default: module.WritingWorkspaceMode };
-});
-
-const LazyProWorkspaceMode = lazy(async () => {
-  const module = await import("./components/ProWorkspaceMode");
-  return { default: module.ProWorkspaceMode };
-});
-
-type AssistantChatPanelProps = {
-  usage: Record<string, unknown> | null;
-  messages: UiMessage[];
-  settings: SettingEntry[];
-  cards: StoryCard[];
-  input: string;
-  streaming: boolean;
-  composerInputRef: { current: HTMLTextAreaElement | null };
-  setInput: (value: string) => void;
-  onSend: () => Promise<void>;
-};
-
-const AssistantChatPanel = memo(function AssistantChatPanel({
-  usage,
-  messages,
-  settings,
-  cards,
-  input,
-  streaming,
-  composerInputRef,
-  setInput,
-  onSend,
-}: AssistantChatPanelProps) {
-  return (
-    <section className="panel chat-panel">
-      <div className="panel-title">
-        <h2>聊天流</h2>
-        {usage ? (
-          <small className="usage">{formatJson(usage)}</small>
-        ) : (
-          <small>尚未返回 usage</small>
-        )}
-      </div>
-
-      <div className="chat-log">
-        {messages.length === 0 ? <p className="empty">先发一条消息，验证 SSE + 动作提议。</p> : null}
-        {messages.map((message) => (
-          <article key={message.id} className={`msg ${message.role}`}>
-            <div className="msg-head">
-              <span>{formatRole(message.role)}</span>
-              {message.streaming ? <em>streaming...</em> : null}
-            </div>
-            {message.role === "assistant" ? (
-              <ContextXRayMessage message={message} settings={settings} cards={cards} />
-            ) : (
-              <pre>{message.content}</pre>
-            )}
-          </article>
-        ))}
-      </div>
-
-      <div className="composer">
-        <textarea
-          aria-label="给助手的输入"
-          ref={composerInputRef}
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="例：请补充设定，主角的第一动机是复仇但不能越过底线。"
-          rows={4}
-          disabled={streaming}
-        />
-        <button className="btn primary" onClick={() => void onSend()} disabled={streaming || !input.trim()}>
-          {streaming ? "发送中..." : "发送"}
-        </button>
-      </div>
-    </section>
-  );
-});
-
-type ActionCardProps = {
-  action: ChatAction;
-  isPending: boolean;
-  isPreviewActive: boolean;
-  controlsDisabled: boolean;
-  onLoadLogs: (actionId: number) => Promise<void>;
-  onPreviewEnter: (actionId: number) => void;
-  onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
-};
-
-const ActionCard = memo(function ActionCard({
-  action,
-  isPending,
-  isPreviewActive,
-  controlsDisabled,
-  onLoadLogs,
-  onPreviewEnter,
-  onMutateAction,
-}: ActionCardProps) {
-  const actionIntent = useMemo(() => resolveActionIntent(action.action_type), [action.action_type]);
-  const actionIntentLabel = useMemo(() => resolveActionIntentLabel(actionIntent), [actionIntent]);
-  const actionStatusLabel = useMemo(() => resolveActionStatusLabel(action.status), [action.status]);
-  const summaryLines = useMemo(() => summarizeAction(action), [action]);
-  const riskHints = useMemo(() => actionRiskHints(action), [action]);
-  const blastRadius = useMemo(() => getActionBlastRadius(action), [action]);
-  const blastRadiusSummary = useMemo(() => summarizeBlastRadius(blastRadius), [blastRadius]);
-  const canPreviewBlastRadius = action.status === "proposed" && blastRadius !== null;
-  const blastRadiusChips = useMemo(() => buildBlastRadiusSummaryChips(blastRadius), [blastRadius]);
-  const [applyConfirmOpen, setApplyConfirmOpen] = useState(false);
-  const diffRows = useMemo(() => buildActionDiffRows(action), [action]);
-  const [undoFlash, setUndoFlash] = useState(false);
-  const previousStatusRef = useRef(action.status);
-  const undoFlashTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (action.status === "proposed") return;
-    setApplyConfirmOpen(false);
-  }, [action.status]);
-
-  useEffect(() => {
-    const previousStatus = previousStatusRef.current;
-    previousStatusRef.current = action.status;
-    if (action.status !== "undone" || previousStatus === "undone") return;
-    if (typeof window === "undefined") return;
-    if (undoFlashTimerRef.current !== null) {
-      window.clearTimeout(undoFlashTimerRef.current);
-      undoFlashTimerRef.current = null;
-    }
-    setUndoFlash(true);
-    undoFlashTimerRef.current = window.setTimeout(() => {
-      setUndoFlash(false);
-      undoFlashTimerRef.current = null;
-    }, 520);
-  }, [action.status]);
-
-  useEffect(() => {
-    return () => {
-      if (undoFlashTimerRef.current !== null && typeof window !== "undefined") {
-        window.clearTimeout(undoFlashTimerRef.current);
-      }
-    };
-  }, []);
-
-  const cardClassName = `action-card action-intent-${actionIntent}${isPending ? " highlight" : ""}${
-    undoFlash ? " undo-flash" : ""
-  }${action.status === "applied" ? " is-applied" : ""}${isPreviewActive ? " is-preview-active" : ""}`;
-
-  return (
-    <article
-      className={cardClassName}
-      onMouseEnter={() => {
-        if (canPreviewBlastRadius) onPreviewEnter(action.id);
-      }}
-      onFocusCapture={() => {
-        if (canPreviewBlastRadius) onPreviewEnter(action.id);
-      }}
-    >
-      <button type="button" className="action-summary" onClick={() => void onLoadLogs(action.id)}>
-        <span>#{action.id}</span>
-        <strong>{`${actionIntentLabel} · ${action.action_type}`}</strong>
-        <div className="action-status-line">
-          <span className={`status ${action.status}`}>{actionStatusLabel}</span>
-          {action.status === "applied" ? <span className="applied-tag">✓ 已应用</span> : null}
-        </div>
-      </button>
-      <div className="action-summary-body">
-        {summaryLines.map((line, idx) => (
-          <p key={`${action.id}-summary-${idx}`} className="action-summary-line">
-            {line}
-          </p>
-        ))}
-        {riskHints.map((line, idx) => (
-          <p key={`${action.id}-risk-${idx}`} className="action-risk-line">
-            风险提示：{line}
-          </p>
-        ))}
-        {blastRadiusSummary ? <p className="action-preview-line">爆炸半径：{blastRadiusSummary}</p> : null}
-      </div>
-      <div className="action-diff">
-        {diffRows.map((row, idx) => {
-          const isAliasRow = isAliasDiffField(row.field);
-          const beforeTags = row.beforeTags ?? (isAliasRow ? parseAliasTags(row.before) : []);
-          const afterTags = row.afterTags ?? (isAliasRow ? parseAliasTags(row.after) : []);
-          return (
-            <article key={`${action.id}-diff-${idx}`} className="action-diff-row">
-              <div className="action-diff-field">{row.field}</div>
-              <div className="action-diff-before">
-                <small>原值</small>
-                {isAliasRow && beforeTags.length > 0 ? (
-                  <div className="action-alias-tags">
-                    {beforeTags.map((tag) => (
-                      <span key={`before-${action.id}-${idx}-${tag}`} className="awareness-tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <pre>{row.before}</pre>
-                )}
-              </div>
-              <div className="action-diff-after">
-                <small>新值</small>
-                {isAliasRow && afterTags.length > 0 ? (
-                  <div className="action-alias-tags">
-                    {afterTags.map((tag) => (
-                      <span key={`after-${action.id}-${idx}-${tag}`} className="awareness-tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <pre>{row.after}</pre>
-                )}
-              </div>
-            </article>
-          );
-        })}
-      </div>
-      <details className="action-raw-details">
-        <summary>调试 JSON</summary>
-        <div className="action-raw-grid">
-          <article>
-            <small>payload</small>
-            <pre>{formatJson(action.payload)}</pre>
-          </article>
-          <article>
-            <small>apply_result</small>
-            <pre>{formatJson(action.apply_result)}</pre>
-          </article>
-          <article>
-            <small>undo_payload</small>
-            <pre>{formatJson(action.undo_payload)}</pre>
-          </article>
-        </div>
-      </details>
-      <div className="action-ops">
-        {action.status === "proposed" ? (
-          <>
-            {applyConfirmOpen ? (
-              <>
-                <button
-                  className="btn primary tiny"
-                  onClick={() => void onMutateAction(action, "apply")}
-                  disabled={controlsDisabled}
-                >
-                  确认应用
-                </button>
-                <button
-                  className="btn ghost tiny"
-                  onClick={() => setApplyConfirmOpen(false)}
-                  disabled={controlsDisabled}
-                >
-                  取消
-                </button>
-              </>
-            ) : (
-              <button
-                className="btn primary tiny"
-                onClick={() => {
-                  setApplyConfirmOpen(true);
-                  if (canPreviewBlastRadius) onPreviewEnter(action.id);
-                }}
-                disabled={controlsDisabled}
-              >
-                应用到项目
-              </button>
-            )}
-            <button
-              className="btn ghost tiny"
-              onClick={() => void onMutateAction(action, "reject")}
-              disabled={controlsDisabled}
-            >
-              暂不采用
-            </button>
-          </>
-        ) : null}
-        {action.status === "applied" ? (
-          <button
-            className="btn ghost tiny"
-            onClick={() => void onMutateAction(action, "undo")}
-            disabled={controlsDisabled}
-          >
-            撤销应用
-          </button>
-        ) : null}
-      </div>
-      {action.status === "proposed" ? (
-        <p className="action-risk-line">应用后会立即写入设定/卡片，并记录审计日志。</p>
-      ) : null}
-      {action.status === "proposed" && applyConfirmOpen ? (
-        <div className="action-apply-confirm" aria-live="polite">
-          <div className="action-apply-confirm-head">
-            <strong>应用前总览</strong>
-            <small>确认前不会写入项目</small>
-          </div>
-          {blastRadius ? (
-            <div className="blast-radius-summary">
-              {blastRadiusChips.length > 0
-                ? blastRadiusChips.map((item) => (
-                    <span key={item.key} className={`blast-radius-chip is-${item.tone}`}>
-                      {item.label}
-                    </span>
-                  ))
-                : <span className="blast-radius-chip is-update">仅锚点波及</span>}
-            </div>
-          ) : (
-            <p className="empty">当前动作未提供图谱爆炸半径预览</p>
-          )}
-
-          {blastRadius ? (
-            <>
-              <div className="action-apply-confirm-actions">
-                <button
-                  type="button"
-                  className="btn ghost tiny"
-                  onClick={() =>
-                    void navigator.clipboard?.writeText(
-                      formatBlastRadiusMarkdown(blastRadius, `动作 #${action.id} · ${action.action_type}`)
-                    )
-                  }
-                >
-                  复制清单
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost tiny"
-                  onClick={() => void navigator.clipboard?.writeText(formatJson(blastRadius))}
-                >
-                  复制 JSON
-                </button>
-              </div>
-
-              <BlastRadiusDetailDisclosure
-                preview={blastRadius}
-                resetKey={`${action.id}:${action.status}`}
-                summaryLabel="查看图谱明细"
-                className="blast-radius-detail action-apply-detail"
-              />
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </article>
-  );
-});
-
-type ActionLogsListProps = {
-  selectedActionId: number | null;
-  actionLogs: ActionAuditLog[];
-};
-
-const ActionLogsList = memo(function ActionLogsList({ selectedActionId, actionLogs }: ActionLogsListProps) {
-  return (
-    <>
-      <div className="panel-title sub">
-        <h3>动作日志</h3>
-        <small>{selectedActionId ? `action #${selectedActionId}` : "未选择动作"}</small>
-      </div>
-      <div className="log-list">
-        {actionLogs.length === 0 ? <p className="empty">点一条动作查看审计日志</p> : null}
-        {actionLogs.map((log) => (
-          <article key={log.id} className="log-card">
-            <div className="msg-head">
-              <span>{log.event_type}</span>
-              <small>{log.operator_id}</small>
-            </div>
-            <pre>{formatJson(log.event_payload)}</pre>
-          </article>
-        ))}
-      </div>
-    </>
-  );
-});
-
-type ChapterOutlineEntry = {
-  id: number;
-  chapterIndex: number;
-  title: string;
-  wordCount: number;
-  preview: string;
-  updatedAt: string;
-  progressPercent: number;
-};
-
-type ChapterOutlineListProps = {
-  chapterOutlines: ChapterOutlineEntry[];
-  activeChapterId: number | null;
-  dragChapterId: number | null;
-  disabled: boolean;
-  onDragStart: (chapterId: number) => void;
-  onDragEnd: () => void;
-  onReorder: (targetChapterId: number) => Promise<void>;
-  onSelect: (chapterId: number) => Promise<void>;
-};
-
-type ChapterOutlineRowData = {
-  chapterOutlines: ChapterOutlineEntry[];
-  activeChapterId: number | null;
-  dragChapterId: number | null;
-  disabled: boolean;
-  onDragStart: (chapterId: number) => void;
-  onDragEnd: () => void;
-  onReorder: (targetChapterId: number) => Promise<void>;
-  onSelect: (chapterId: number) => Promise<void>;
-};
-
-const ChapterOutlineRow = memo(function ChapterOutlineRow({
-  index,
-  style,
-  data,
-}: ListChildComponentProps<ChapterOutlineRowData>) {
-  const item = data.chapterOutlines[index];
-  if (!item) return null;
-  return (
-    <div style={style} className="chapter-outline-row">
-      <button
-        type="button"
-        draggable
-        className={`chapter-outline-item ${item.id === data.activeChapterId ? "active" : ""} ${
-          item.id === data.dragChapterId ? "dragging" : ""
-        }`}
-        onDragStart={() => data.onDragStart(item.id)}
-        onDragEnd={data.onDragEnd}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => {
-          event.preventDefault();
-          void data.onReorder(item.id);
-        }}
-        onClick={() => void data.onSelect(item.id)}
-        disabled={data.disabled}
-      >
-        <strong>
-          {item.chapterIndex}. {item.title}
-        </strong>
-        <small>{item.wordCount} 字</small>
-        <span>{item.preview}</span>
-        <div className="chapter-outline-progress" aria-hidden="true">
-          <span style={{ width: `${item.progressPercent}%` }} />
-        </div>
-      </button>
-    </div>
-  );
-});
-
-const ChapterOutlineList = memo(function ChapterOutlineList({
-  chapterOutlines,
-  activeChapterId,
-  dragChapterId,
-  disabled,
-  onDragStart,
-  onDragEnd,
-  onReorder,
-  onSelect,
-}: ChapterOutlineListProps) {
-  const listHeight = Math.min(
-    CHAPTER_OUTLINE_MAX_HEIGHT,
-    Math.max(CHAPTER_OUTLINE_ROW_HEIGHT, chapterOutlines.length * CHAPTER_OUTLINE_ROW_HEIGHT)
-  );
-  const listData = useMemo<ChapterOutlineRowData>(
-    () => ({
-      chapterOutlines,
-      activeChapterId,
-      dragChapterId,
-      disabled,
-      onDragStart,
-      onDragEnd,
-      onReorder,
-      onSelect,
-    }),
-    [chapterOutlines, activeChapterId, dragChapterId, disabled, onDragStart, onDragEnd, onReorder, onSelect]
-  );
-
-  return (
-    <div className="chapter-outline-list">
-      {chapterOutlines.length === 0 ? <p className="empty">暂无章节</p> : null}
-      {chapterOutlines.length > 0 ? (
-        <FixedSizeList
-          className="chapter-outline-virtual-list"
-          height={listHeight}
-          width="100%"
-          itemCount={chapterOutlines.length}
-          itemData={listData}
-          itemSize={CHAPTER_OUTLINE_ROW_HEIGHT}
-          itemKey={(index: number, data: ChapterOutlineRowData) => data.chapterOutlines[index]?.id ?? index}
-          overscanCount={CHAPTER_OUTLINE_OVERSCAN}
-        >
-          {ChapterOutlineRow}
-        </FixedSizeList>
-      ) : null}
-    </div>
-  );
-});
-
-type DraftRevisionListProps = {
-  draftRevisions: ProjectChapterRevision[];
-  disabled: boolean;
-  onRollbackDraftToVersion: (targetVersion: number) => Promise<void>;
-};
-
-const DraftRevisionList = memo(function DraftRevisionList({
-  draftRevisions,
-  disabled,
-  onRollbackDraftToVersion,
-}: DraftRevisionListProps) {
-  return (
-    <details className="draft-history">
-      <summary>版本历史（最近 {draftRevisions.length} 条）</summary>
-      <div className="draft-revision-list">
-        {draftRevisions.length === 0 ? <p className="empty">暂无版本历史</p> : null}
-        {draftRevisions.map((revision) => (
-          <article key={revision.id} className="draft-revision-card">
-            <div className="msg-head">
-              <span>
-                v{revision.version} · {revision.source}
-              </span>
-              <small>{formatDateTime(revision.created_at)}</small>
-            </div>
-            {(revision.semantic_summary ?? []).length > 0 ? (
-              <ul className="revision-semantic-list">
-                {(revision.semantic_summary ?? []).map((line, idx) => (
-                  <li key={`${revision.id}-semantic-${idx}`}>{line}</li>
-                ))}
-              </ul>
-            ) : null}
-            <pre>{revision.content.slice(0, 220) || "(空正文)"}</pre>
-            <div className="action-ops">
-              <button
-                className="btn ghost tiny"
-                onClick={() => void onRollbackDraftToVersion(revision.version)}
-                disabled={disabled}
-              >
-                回滚到此版本
-              </button>
-            </div>
-          </article>
-        ))}
-      </div>
-    </details>
-  );
-});
-
-
-
-type TopBarProps = {
-  uiMode: "writing" | "pro";
-  zenMode: boolean;
-  streaming: boolean;
-  settingsDialogOpen: boolean;
-  assistantDrawerOpen: boolean;
-  onToggleUiMode: () => void;
-  onToggleZenMode: () => void;
-  onOpenSettingsDialog: () => void;
-  onOpenAssistantDrawer: () => void;
-  onRefreshSnapshot: () => Promise<void>;
-  onStartNewSession: () => void;
-};
-
-const TopBar = memo(function TopBar({
-  uiMode,
-  zenMode,
-  streaming,
-  settingsDialogOpen,
-  assistantDrawerOpen,
-  onToggleUiMode,
-  onToggleZenMode,
-  onOpenSettingsDialog,
-  onOpenAssistantDrawer,
-  onRefreshSnapshot,
-  onStartNewSession,
-}: TopBarProps) {
-  return (
-    <header className="topbar">
-      <div>
-        <p className="eyebrow">Novel Platform</p>
-        <h1>AI 辅助写作工作台</h1>
-      </div>
-      <div className="top-actions">
-        <ModeSwitch uiMode={uiMode} onToggle={onToggleUiMode} disabled={streaming} />
-        <button
-          className="btn ghost"
-          onClick={onToggleZenMode}
-          disabled={streaming || uiMode !== "writing"}
-          aria-pressed={zenMode}
-        >
-          {zenMode ? "退出沉浸" : "进入沉浸"}
-        </button>
-        <button
-          type="button"
-          className="btn ghost"
-          onClick={onOpenSettingsDialog}
-          aria-haspopup="dialog"
-          aria-expanded={settingsDialogOpen}
-          aria-controls="settings-dialog"
-          disabled={streaming}
-        >
-          写作设置
-        </button>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={onOpenAssistantDrawer}
-          aria-haspopup="dialog"
-          aria-expanded={assistantDrawerOpen}
-          aria-controls="assistant-drawer"
-        >
-          助手抽屉
-        </button>
-        <button className="btn ghost" onClick={() => void onRefreshSnapshot()} disabled={streaming}>
-          刷新快照
-        </button>
-        <button className="btn ghost" onClick={onStartNewSession} disabled={streaming}>
-          新会话
-        </button>
-      </div>
-    </header>
-  );
-});
-
-type SettingsDialogProps = {
-  onCloseSettingsDialog: () => void;
-  settingsDialogRef: { current: HTMLElement | null };
-  projectId: number;
-  setProjectId: (projectId: number) => void;
-  model: string;
-  setModel: (value: string) => void;
-  modelProfiles: ModelProfile[];
-  ghostModelProfileId: string | null;
-  setGhostModelProfileId: (value: string | null) => void;
-  selectedModelProfileId: string | null;
-  setSelectedModelProfileId: (value: string | null) => void;
-  modelProfileDraftIdInput: string;
-  setModelProfileDraftIdInput: (value: string) => void;
-  modelProfileName: string;
-  setModelProfileName: (value: string) => void;
-  modelProfileProvider: "openai_compatible" | "deepseek" | "claude" | "gemini";
-  setModelProfileProvider: (value: "openai_compatible" | "deepseek" | "claude" | "gemini") => void;
-  modelProfileBaseUrl: string;
-  setModelProfileBaseUrl: (value: string) => void;
-  modelProfileApiKey: string;
-  setModelProfileApiKey: (value: string) => void;
-  modelProfileApiKeyMasked: string | null;
-  clearModelProfileApiKey: boolean;
-  setClearModelProfileApiKey: (value: boolean) => void;
-  modelProfileModel: string;
-  setModelProfileModel: (value: string) => void;
-  modelProfileSaving: boolean;
-  onSaveModelProfile: () => Promise<void>;
-  onDeleteModelProfile: () => Promise<void>;
-  onActivateModelProfile: () => Promise<void>;
-  onResetModelProfileDraft: () => void;
-  chatTemperatureProfile: "action" | "chat" | "brainstorm";
-  setChatTemperatureProfile: (value: "action" | "chat" | "brainstorm") => void;
-  ghostTemperatureProfile: "ghost" | "chat" | "action" | "brainstorm";
-  setGhostTemperatureProfile: (value: "ghost" | "chat" | "action" | "brainstorm") => void;
-  temperatureOverrideInput: string;
-  setTemperatureOverrideInput: (value: string) => void;
-  contextWindowProfile: "balanced" | "chapter_focus" | "world_focus" | "minimal";
-  setContextWindowProfile: (value: "balanced" | "chapter_focus" | "world_focus" | "minimal") => void;
-  povMode: "global" | "character";
-  setPovMode: (value: "global" | "character") => void;
-  povAnchor: string;
-  setPovAnchor: (value: string) => void;
-  ragMode: "local" | "global" | "hybrid" | "mix";
-  setRagMode: (value: "local" | "global" | "hybrid" | "mix") => void;
-  deterministicFirst: boolean;
-  setDeterministicFirst: (value: boolean) => void;
-  thinkingEnabled: boolean;
-  setThinkingEnabled: (value: boolean) => void;
-  referenceProjectInput: string;
-  setReferenceProjectInput: (value: string) => void;
-  ghostAutoEnabled: boolean;
-  setGhostAutoEnabled: (value: boolean) => void;
-  typewriterModeEnabled: boolean;
-  setTypewriterModeEnabled: (value: boolean) => void;
-  writingTheme: WritingTheme;
-  setWritingTheme: (value: WritingTheme) => void;
-  streaming: boolean;
-};
-
-const SettingsDialog = memo(function SettingsDialog({
-  onCloseSettingsDialog,
-  settingsDialogRef,
-  projectId,
-  setProjectId,
-  model,
-  setModel,
-  modelProfiles,
-  ghostModelProfileId,
-  setGhostModelProfileId,
-  selectedModelProfileId,
-  setSelectedModelProfileId,
-  modelProfileDraftIdInput,
-  setModelProfileDraftIdInput,
-  modelProfileName,
-  setModelProfileName,
-  modelProfileProvider,
-  setModelProfileProvider,
-  modelProfileBaseUrl,
-  setModelProfileBaseUrl,
-  modelProfileApiKey,
-  setModelProfileApiKey,
-  modelProfileApiKeyMasked,
-  clearModelProfileApiKey,
-  setClearModelProfileApiKey,
-  modelProfileModel,
-  setModelProfileModel,
-  modelProfileSaving,
-  onSaveModelProfile,
-  onDeleteModelProfile,
-  onActivateModelProfile,
-  onResetModelProfileDraft,
-  chatTemperatureProfile,
-  setChatTemperatureProfile,
-  ghostTemperatureProfile,
-  setGhostTemperatureProfile,
-  temperatureOverrideInput,
-  setTemperatureOverrideInput,
-  contextWindowProfile,
-  setContextWindowProfile,
-  povMode,
-  setPovMode,
-  povAnchor,
-  setPovAnchor,
-  ragMode,
-  setRagMode,
-  deterministicFirst,
-  setDeterministicFirst,
-  thinkingEnabled,
-  setThinkingEnabled,
-  referenceProjectInput,
-  setReferenceProjectInput,
-  ghostAutoEnabled,
-  setGhostAutoEnabled,
-  typewriterModeEnabled,
-  setTypewriterModeEnabled,
-  writingTheme,
-  setWritingTheme,
-  streaming,
-}: SettingsDialogProps) {
-  const activeProfile = useMemo(() => {
-    return modelProfiles.find((profile) => Boolean(profile.is_active)) ?? null;
-  }, [modelProfiles]);
-
-  const resolvedWritingProfile = useMemo(() => {
-    const resolvedId = ghostModelProfileId ?? activeProfile?.profile_id ?? null;
-    if (!resolvedId) return null;
-    return modelProfiles.find((profile) => profile.profile_id === resolvedId) ?? null;
-  }, [activeProfile?.profile_id, ghostModelProfileId, modelProfiles]);
-
-  const writingProfileHint = useMemo(() => {
-    if (resolvedWritingProfile) {
-      const label = `${resolvedWritingProfile.name || resolvedWritingProfile.profile_id} (${resolvedWritingProfile.provider})`;
-      return ghostModelProfileId ? `当前生效：固定 → ${label}` : `当前生效：跟随 active → ${label}`;
-    }
-    if (ghostModelProfileId) {
-      return "当前生效：固定 Profile 未命中（将回退后端默认 LLM）";
-    }
-    if (activeProfile) {
-      return "当前生效：active Profile 未命中（将回退后端默认 LLM）";
-    }
-    return "当前生效：未配置（将回退后端默认 LLM）";
-  }, [activeProfile, ghostModelProfileId, resolvedWritingProfile]);
-
-  return (
-    <div className="settings-backdrop" role="presentation" onClick={onCloseSettingsDialog}>
-      <section
-        id="settings-dialog"
-        ref={settingsDialogRef}
-        className="settings-modal panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-dialog-title"
-        tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="panel-title">
-          <h2 id="settings-dialog-title">写作设置</h2>
-          <button
-            type="button"
-            className="btn ghost tiny"
-            onClick={onCloseSettingsDialog}
-            aria-label="关闭写作设置"
-          >
-            关闭
-          </button>
-        </div>
-        <div className="settings-sections">
-          <details className="settings-section" open>
-            <summary>
-              <strong>基础写作（推荐）</strong>
-              <small>只改这组也能直接开始写作</small>
-            </summary>
-            <div className="settings-section-body">
-              <div className="settings-grid">
-                <label>
-                  项目 ID
-                  <input
-                    data-autofocus
-                    type="number"
-                    value={projectId}
-                    min={1}
-                    onChange={(event) => setProjectId(Number(event.target.value || 1))}
-                    disabled={streaming}
-                  />
-                </label>
-                <label>
-                  写作主题
-                  <select value={writingTheme} onChange={(event) => setWritingTheme(event.target.value as WritingTheme)}>
-                    <option value="paper">paper（纸感衬线）</option>
-                    <option value="wenkai">wenkai（文楷复古）</option>
-                    <option value="modern">modern（现代简洁）</option>
-                    <option value="contrast">contrast（高对比）</option>
-                  </select>
-                </label>
-                <label>
-                  打字机滚动
-                  <select
-                    value={typewriterModeEnabled ? "on" : "off"}
-                    onChange={(event) => setTypewriterModeEnabled(event.target.value === "on")}
-                  >
-                    <option value="on">开启（光标行居中）</option>
-                    <option value="off">关闭</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-          </details>
-
-          <details className="settings-section">
-            <summary>
-              <strong>模型与检索</strong>
-              <small>Profile、RAG、上下文策略</small>
-            </summary>
-            <div className="settings-section-body">
-              <div className="settings-grid">
-                <label>
-                  模型覆盖（可空）
-                  <small className="field-help">临时指定本次写作用哪个模型；留空时使用当前激活 Profile。</small>
-                  <input
-                    type="text"
-                    placeholder="gpt-4o-mini"
-                    value={model}
-                    onChange={(event) => setModel(event.target.value)}
-                    disabled={streaming}
-                  />
-                </label>
-                <label>
-                  写作专用 Profile（可空）
-                  <small className="field-help">影响 Ghost Text + 润色/扩写；留空时跟随当前激活 Profile。</small>
-                  <select
-                    value={ghostModelProfileId ?? ""}
-                    onChange={(event) => setGhostModelProfileId(event.target.value || null)}
-                    disabled={streaming || modelProfileSaving}
-                  >
-                    <option value="">跟随当前激活 Profile</option>
-                    {modelProfiles.map((profile) => (
-                      <option key={profile.profile_id} value={profile.profile_id}>
-                        {`${profile.is_active ? "★ " : ""}${profile.name || profile.profile_id} (${profile.provider})`}
-                      </option>
-                    ))}
-                  </select>
-                  <small className="field-help">{writingProfileHint}</small>
-                </label>
-                <label>
-                  模型配置中心（Profile）
-                  <small className="field-help">切换你预设好的模型连接配置，适合在不同服务间快速切换。</small>
-                  <select
-                    value={selectedModelProfileId ?? ""}
-                    onChange={(event) => setSelectedModelProfileId(event.target.value || null)}
-                    disabled={streaming || modelProfileSaving}
-                  >
-                    <option value="">新建 profile</option>
-                    {modelProfiles.map((profile) => (
-                      <option key={profile.profile_id} value={profile.profile_id}>
-                        {`${profile.is_active ? "★ " : ""}${profile.name || profile.profile_id} (${profile.provider})`}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Profile ID（新建可填）
-                  <small className="field-help">给这套配置起一个机器可识别的代号，后续便于复用。</small>
-                  <input
-                    type="text"
-                    placeholder="relay-main"
-                    value={modelProfileDraftIdInput}
-                    onChange={(event) => setModelProfileDraftIdInput(event.target.value)}
-                    disabled={streaming || modelProfileSaving || Boolean(selectedModelProfileId)}
-                  />
-                </label>
-                <label>
-                  Profile 名称
-                  <small className="field-help">给自己看的名称，建议写成“用途 + 场景”，便于识别。</small>
-                  <input
-                    type="text"
-                    placeholder="主中转"
-                    value={modelProfileName}
-                    onChange={(event) => setModelProfileName(event.target.value)}
-                    disabled={streaming || modelProfileSaving}
-                  />
-                </label>
-                <label>
-                  Provider
-                  <small className="field-help">模型服务类型；不知道怎么选时，优先保持默认即可。</small>
-                  <select
-                    value={modelProfileProvider}
-                    onChange={(event) =>
-                      setModelProfileProvider(
-                        event.target.value as "openai_compatible" | "deepseek" | "claude" | "gemini"
-                      )
-                    }
-                    disabled={streaming || modelProfileSaving}
-                  >
-                    <option value="openai_compatible">openai_compatible（推荐中转）</option>
-                    <option value="deepseek">deepseek</option>
-                    <option value="claude">claude</option>
-                    <option value="gemini">gemini</option>
-                  </select>
-                </label>
-                <label>
-                  Base URL
-                  <small className="field-help">模型服务入口地址，通常由服务商或中转服务提供。</small>
-                  <input
-                    type="text"
-                    placeholder="https://api.example.com/v1"
-                    value={modelProfileBaseUrl}
-                    onChange={(event) => setModelProfileBaseUrl(event.target.value)}
-                    disabled={streaming || modelProfileSaving}
-                  />
-                </label>
-                <label>
-                  API Key
-                  <small className="field-help">访问模型服务的密钥，平台仅在调用时使用，不会展示明文。</small>
-                  <input
-                    type="password"
-                    placeholder={selectedModelProfileId && modelProfileApiKeyMasked ? modelProfileApiKeyMasked : "sk-..."}
-                    value={modelProfileApiKey}
-                    onChange={(event) => {
-                      setClearModelProfileApiKey(false);
-                      setModelProfileApiKey(event.target.value);
-                    }}
-                    disabled={streaming || modelProfileSaving}
-                  />
-                </label>
-                <label>
-                  模型名
-                  <small className="field-help">服务端可用的模型标识，不确定时使用服务商推荐值。</small>
-                  <input
-                    type="text"
-                    placeholder="gpt-5-mini"
-                    value={modelProfileModel}
-                    onChange={(event) => setModelProfileModel(event.target.value)}
-                    disabled={streaming || modelProfileSaving}
-                  />
-                </label>
-                <label>
-                  Key 操作
-                  <small className="field-help">更新 Profile 时，选择保留现有密钥还是清空重设。</small>
-                  <select
-                    value={clearModelProfileApiKey ? "clear" : "keep"}
-                    onChange={(event) => setClearModelProfileApiKey(event.target.value === "clear")}
-                    disabled={streaming || modelProfileSaving || !selectedModelProfileId}
-                  >
-                    <option value="keep">保持现有 Key</option>
-                    <option value="clear">清空现有 Key</option>
-                  </select>
-                </label>
-                <div className="action-ops">
-                  <button
-                    type="button"
-                    className="btn ghost tiny"
-                    onClick={onResetModelProfileDraft}
-                    disabled={streaming || modelProfileSaving}
-                  >
-                    新建草稿
-                  </button>
-                  <button
-                    type="button"
-                    className="btn primary tiny"
-                    onClick={() => void onSaveModelProfile()}
-                    disabled={streaming || modelProfileSaving}
-                  >
-                    {modelProfileSaving ? "保存中..." : selectedModelProfileId ? "更新 Profile" : "创建 Profile"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn ghost tiny"
-                    onClick={() => void onActivateModelProfile()}
-                    disabled={streaming || modelProfileSaving || !selectedModelProfileId}
-                  >
-                    设为激活
-                  </button>
-                  <button
-                    type="button"
-                    className="btn ghost tiny"
-                    onClick={() => void onDeleteModelProfile()}
-                    disabled={streaming || modelProfileSaving || !selectedModelProfileId}
-                  >
-                    删除
-                  </button>
-                </div>
-                <p className="field-help settings-actions-hint">保存后即可生效；“设为激活”会作为默认模型配置。</p>
-                <label>
-                  上下文滑窗策略
-                  <small className="field-help">控制助手优先关注“当前章节”还是“全局世界观”。</small>
-                  <select
-                    value={contextWindowProfile}
-                    onChange={(event) =>
-                      setContextWindowProfile(
-                        event.target.value as "balanced" | "chapter_focus" | "world_focus" | "minimal"
-                      )
-                    }
-                    disabled={streaming}
-                  >
-                    <option value="balanced">balanced（默认均衡）</option>
-                    <option value="chapter_focus">chapter_focus（章节优先）</option>
-                    <option value="world_focus">world_focus（世界观优先）</option>
-                    <option value="minimal">minimal（最小上下文）</option>
-                  </select>
-                </label>
-                <label>
-                  POV 模式
-                  <small className="field-help">决定叙事视角是全局叙述，还是围绕某个角色展开。</small>
-                  <select
-                    value={povMode}
-                    onChange={(event) => setPovMode(event.target.value as "global" | "character")}
-                    disabled={streaming}
-                  >
-                    <option value="global">全局视角</option>
-                    <option value="character">角色沙箱</option>
-                  </select>
-                </label>
-                <label>
-                  POV 锚点（角色名）
-                  <small className="field-help">仅在角色视角时填写，用来指定“围绕谁来写”。</small>
-                  <input
-                    type="text"
-                    placeholder={povMode === "character" ? "例如：林澈" : "全局模式可留空"}
-                    value={povAnchor}
-                    onChange={(event) => setPovAnchor(event.target.value)}
-                    disabled={streaming}
-                  />
-                </label>
-                <label>
-                  RAG 路由
-                  <small className="field-help">决定检索资料来自当前项目、全局知识，或两者混合。</small>
-                  <select
-                    value={ragMode}
-                    onChange={(event) => setRagMode(event.target.value as "local" | "global" | "hybrid" | "mix")}
-                    disabled={streaming}
-                  >
-                    <option value="local">local</option>
-                    <option value="global">global</option>
-                    <option value="hybrid">hybrid</option>
-                    <option value="mix">mix</option>
-                  </select>
-                </label>
-                <label>
-                  事实短路
-                  <small className="field-help">开启后优先采用已确认事实，减少跑偏但灵活度会降低。</small>
-                  <select
-                    value={deterministicFirst ? "on" : "off"}
-                    onChange={(event) => setDeterministicFirst(event.target.value === "on")}
-                    disabled={streaming}
-                  >
-                    <option value="off">关闭</option>
-                    <option value="on">开启（DSL+GRAPH优先）</option>
-                  </select>
-                </label>
-                <label>
-                  跨项目引用（逗号分隔）
-                  <small className="field-help">把其他项目当作参考资料源，适合系列文共享设定。</small>
-                  <input
-                    type="text"
-                    placeholder="例如：2,3"
-                    value={referenceProjectInput}
-                    onChange={(event) => setReferenceProjectInput(event.target.value)}
-                    disabled={streaming}
-                  />
-                </label>
-              </div>
-            </div>
-          </details>
-
-          <details className="settings-section">
-            <summary>
-              <strong>高级调优</strong>
-              <small>温度与 Thinking 配置</small>
-            </summary>
-            <div className="settings-section-body">
-              <div className="settings-grid">
-                <label>
-                  聊天温度策略
-                  <small className="field-help">影响助手回答风格：越保守越稳定，越发散越有新意。</small>
-                  <select
-                    value={chatTemperatureProfile}
-                    onChange={(event) => setChatTemperatureProfile(event.target.value as "action" | "chat" | "brainstorm")}
-                    disabled={streaming}
-                  >
-                    <option value="action">action（稳健提案）</option>
-                    <option value="chat">chat（常规写作）</option>
-                    <option value="brainstorm">brainstorm（发散灵感）</option>
-                  </select>
-                </label>
-                <label>
-                  Ghost 温度策略
-                  <small className="field-help">控制续写建议的创造程度，建议与当前写作阶段匹配。</small>
-                  <select
-                    value={ghostTemperatureProfile}
-                    onChange={(event) =>
-                      setGhostTemperatureProfile(event.target.value as "ghost" | "chat" | "action" | "brainstorm")
-                    }
-                    disabled={streaming}
-                  >
-                    <option value="ghost">ghost（续写）</option>
-                    <option value="chat">chat（常规）</option>
-                    <option value="action">action（保守）</option>
-                    <option value="brainstorm">brainstorm（发散）</option>
-                  </select>
-                </label>
-                <label>
-                  Ghost 自动建议
-                  <small className="field-help">开启后会在正文变化时自动请求续写建议（适合连续写作）。</small>
-                  <select
-                    value={ghostAutoEnabled ? "on" : "off"}
-                    onChange={(event) => setGhostAutoEnabled(event.target.value === "on")}
-                    disabled={streaming}
-                  >
-                    <option value="off">关闭</option>
-                    <option value="on">开启</option>
-                  </select>
-                </label>
-                <label>
-                  温度覆盖（可空 0~2）
-                  <small className="field-help">手动覆盖所有温度策略；留空时按上面的策略自动决定。</small>
-                  <input
-                    type="number"
-                    min={0}
-                    max={2}
-                    step={0.05}
-                    value={temperatureOverrideInput}
-                    onChange={(event) => setTemperatureOverrideInput(event.target.value)}
-                    disabled={streaming}
-                  />
-                </label>
-                <label>
-                  Thinking
-                  <small className="field-help">开启后会更谨慎地组织答案，通常更稳但速度略慢。</small>
-                  <select
-                    value={thinkingEnabled ? "on" : "off"}
-                    onChange={(event) => setThinkingEnabled(event.target.value === "on")}
-                    disabled={streaming}
-                  >
-                    <option value="off">关闭</option>
-                    <option value="on">开启（更稳健）</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-          </details>
-        </div>
-      </section>
-    </div>
-  );
-});
-
-// TODO(blast-radius): Apply 前总览确认区块（two-step apply）将在此处复用 blast radius 明细组件。
-type AssistantActionsPanelProps = {
-  sortedActions: ChatAction[];
-  pendingActionIds: number[];
-  mutatingActionId: number | null;
-  streamLatencySamples: StreamLatencySample[];
-  tokenUsageSamples: TokenUsageSample[];
-  retrievalHitSamples: RetrievalHitSample[];
-  consistencyAudits: ConsistencyAuditReport[];
-  consistencyAuditRunning: boolean;
-  traceEvents: ChatStreamTraceEvent[];
-  graphTimeline: GraphTimelineSnapshot | null;
-  graphTimelineLoading: boolean;
-  graphTimelineChapterIndex: number;
-  maxChapterIndex: number;
-  setGraphTimelineChapterIndex: (chapterIndex: number) => void;
-  selectedActionId: number | null;
-  actionLogs: ActionAuditLog[];
-  onLoadLogs: (actionId: number) => Promise<void>;
-  onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
-  onRunConsistencyAudit: () => Promise<void>;
-};
-
-const AssistantActionsPanel = memo(function AssistantActionsPanel({
-  sortedActions,
-  pendingActionIds,
-  mutatingActionId,
-  streamLatencySamples,
-  tokenUsageSamples,
-  retrievalHitSamples,
-  consistencyAudits,
-  consistencyAuditRunning,
-  traceEvents,
-  graphTimeline,
-  graphTimelineLoading,
-  graphTimelineChapterIndex,
-  maxChapterIndex,
-  setGraphTimelineChapterIndex,
-  selectedActionId,
-  actionLogs,
-  onLoadLogs,
-  onMutateAction,
-  onRunConsistencyAudit,
-}: AssistantActionsPanelProps) {
-  const pendingActionSet = useMemo(() => new Set(pendingActionIds), [pendingActionIds]);
-  const latestAudits = useMemo(() => consistencyAudits.slice(0, 3), [consistencyAudits]);
-  const [hoveredActionId, setHoveredActionId] = useState<number | null>(null);
-  const hoveredAction = useMemo(
-    () => sortedActions.find((item) => item.id === hoveredActionId) ?? null,
-    [hoveredActionId, sortedActions]
-  );
-  const selectedAction = useMemo(
-    () => sortedActions.find((item) => item.id === selectedActionId) ?? null,
-    [selectedActionId, sortedActions]
-  );
-  const activeBlastAction = hoveredAction ?? selectedAction;
-  const previewBlastRadius = useMemo(() => getActionBlastRadius(activeBlastAction), [activeBlastAction]);
-  const previewBlastRadiusSummary = useMemo(() => summarizeBlastRadius(previewBlastRadius), [previewBlastRadius]);
-  const previewBlastRadiusChips = useMemo(
-    () => buildBlastRadiusSummaryChips(previewBlastRadius),
-    [previewBlastRadius]
-  );
-  const previewActionLabel = useMemo(
-    () => (activeBlastAction ? summarizeAction(activeBlastAction)[0] ?? `动作 #${activeBlastAction.id}` : ""),
-    [activeBlastAction]
-  );
-  const previewNodeChangeMap = useMemo(() => {
-    const next = new Map<string, string>();
-    if (!previewBlastRadius) return next;
-    previewBlastRadius.nodes.forEach((item) => {
-      next.set(normalizeGraphPreviewToken(item.id || item.label), String(item.change || "touch"));
-    });
-    return next;
-  }, [previewBlastRadius]);
-  const previewEdgeChangeMap = useMemo(() => {
-    const next = new Map<string, string>();
-    if (!previewBlastRadius) return next;
-    previewBlastRadius.edges.forEach((item) => {
-      next.set(
-        buildGraphPreviewEdgeKey(item.source, item.relation, item.target),
-        String(item.change || "add")
-      );
-    });
-    return next;
-  }, [previewBlastRadius]);
-  const hasPreviewOverlay = Boolean(
-    previewBlastRadius && (previewBlastRadius.nodes.length > 0 || previewBlastRadius.edges.length > 0)
-  );
-  const hasBlastRadiusPanel = Boolean(hasPreviewOverlay || (previewBlastRadius?.notes?.length ?? 0) > 0);
-
-  useEffect(() => {
-    if (hoveredActionId === null) return;
-    if (sortedActions.some((item) => item.id === hoveredActionId)) return;
-    setHoveredActionId(null);
-  }, [hoveredActionId, sortedActions]);
-
-  const traceGroups = useMemo(() => {
-    const source = traceEvents.slice(-24);
-    const groups: Array<{
-      key: string;
-      scope: string;
-      stage: string;
-      status: string;
-      items: ChatStreamTraceEvent[];
-    }> = [];
-    source.forEach((item) => {
-      const scope = String(item.scope || "pipeline");
-      const stage = String(item.stage || "step");
-      const status = String(item.status || "info");
-      const previous = groups[groups.length - 1];
-      if (previous && previous.scope === scope && previous.stage === stage) {
-        previous.items.push(item);
-        previous.status = status;
-        return;
-      }
-      groups.push({
-        key: `${scope}:${stage}:${item.seq}`,
-        scope,
-        stage,
-        status,
-        items: [item],
-      });
-    });
-    return groups;
-  }, [traceEvents]);
-  const {
-    timelineEntityQuery,
-    setTimelineEntityQuery,
-    timelineRelationFilter,
-    setTimelineRelationFilter,
-    selectedTimelineNodeId,
-    setSelectedTimelineNodeId,
-    timelineRelationOptions,
-    graphNodes,
-    graphEdges,
-    highlightedEdgeIdSet,
-    highlightedNodeIdSet,
-    selectedTimelineNodeLabel,
-    graphLayout,
-    sliderValue,
-    timelineNodesTotal,
-    timelineEdgesTotal,
-    timelineNodesCount,
-    timelineEdgesCount,
-    hasTimelineFilter,
-    graphNodeLimit,
-    graphEdgeLimit,
-    graphNodesCandidateCount,
-    graphEdgesCandidateCount,
-    graphNodesTruncated,
-    graphEdgesTruncated,
-  } = useTimelineGraphFlow({
-    graphTimeline,
-    graphTimelineChapterIndex,
-    maxChapterIndex,
-    previewBlastRadius,
-  });
-  const graphPreviewTruncated = graphNodesTruncated || graphEdgesTruncated;
-  const resolveTraceChapterIndex = (item: ChatStreamTraceEvent): number | null => {
-    const metaRecord = item.meta && typeof item.meta === "object" ? (item.meta as Record<string, unknown>) : null;
-    const chapterRaw = metaRecord?.chapter_index ?? metaRecord?.current_chapter;
-    if (typeof chapterRaw === "number" && Number.isFinite(chapterRaw) && chapterRaw > 0) {
-      return Math.floor(chapterRaw);
-    }
-    if (typeof chapterRaw === "string") {
-      const chapterValue = Number(chapterRaw);
-      if (Number.isFinite(chapterValue) && chapterValue > 0) {
-        return Math.floor(chapterValue);
-      }
-    }
-    const text = String(item.message || "");
-    const match = text.match(/第\s*([0-9]{1,6})\s*章/u);
-    if (!match) return null;
-    const chapterValue = Number(match[1]);
-    if (!Number.isFinite(chapterValue) || chapterValue <= 0) return null;
-    return Math.floor(chapterValue);
-  };
-  const clampChapterIndex = (value: number): number =>
-    Math.max(1, Math.min(Math.max(1, maxChapterIndex), Math.floor(value)));
-
-  return (
-    <section
-      className="panel side-panel"
-      onMouseLeave={() => setHoveredActionId(null)}
-      onBlurCapture={(event) => {
-        const nextTarget = event.relatedTarget;
-        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
-        setHoveredActionId(null);
-      }}
-    >
-      <div className="panel-title">
-        <h2>动作提议</h2>
-        <small>pending: {pendingActionIds.length}</small>
-      </div>
-      <div className="trace-list">
-        <div className="trace-list-head">
-          <strong>导演视角 · 推演轨迹</strong>
-        </div>
-        {traceGroups.length === 0 ? <p className="empty">等待 brainstorm 流式轨迹...</p> : null}
-        {traceGroups.map((group, groupIndex) => (
-          <details
-            key={group.key}
-            className={`trace-group status-${group.status}`}
-            open={groupIndex === traceGroups.length - 1}
-          >
-            <summary className="trace-group-head">
-              <span>{`${group.scope} · ${group.stage}`}</span>
-              <small>{`${group.items.length} 条`}</small>
-            </summary>
-            <div className="trace-group-body">
-              {group.items.map((item) => (
-                (() => {
-                  const traceChapter = resolveTraceChapterIndex(item);
-                  const jumpChapter = traceChapter ? clampChapterIndex(traceChapter) : null;
-                  return (
-                    <article
-                      key={`trace-${item.seq}-${item.stage}`}
-                      className={`trace-item status-${String(item.status || "info")}`}
-                    >
-                      <div className="trace-item-head">
-                        <span>{item.step && item.total ? `[${item.step}/${item.total}]` : `#${item.seq}`}</span>
-                        <small>{item.scope}</small>
-                      </div>
-                      <p>{item.message}</p>
-                      {jumpChapter ? (
-                        <div className="trace-item-actions">
-                          <button
-                            type="button"
-                            className="btn ghost tiny"
-                            onClick={() => setGraphTimelineChapterIndex(jumpChapter)}
-                            disabled={graphTimelineLoading}
-                          >
-                            {`跳到第 ${jumpChapter} 章`}
-                          </button>
-                        </div>
-                      ) : null}
-                    </article>
-                  );
-                })()
-              ))}
-            </div>
-          </details>
-        ))}
-      </div>
-      <div className="audit-list">
-        <div className="audit-list-head">
-          <strong>创作体检</strong>
-          <button
-            type="button"
-            className="btn ghost tiny"
-            onClick={() => void onRunConsistencyAudit()}
-            disabled={consistencyAuditRunning || mutatingActionId !== null}
-          >
-            {consistencyAuditRunning ? "体检中..." : "立即体检"}
-          </button>
-        </div>
-        {latestAudits.length === 0 ? <p className="empty">暂无体检报告</p> : null}
-        {latestAudits.map((item) => {
-          const summary = item.summary ?? {};
-          const issueCount = Number(summary.issues ?? 0) || 0;
-          const temporal = Number(summary.temporal_conflicts ?? 0) || 0;
-          const foreshadow = Number(summary.foreshadow_overdue ?? 0) || 0;
-          return (
-            <article key={item.report_id} className="audit-item">
-              <div className="audit-item-head">
-                <span className={`audit-status ${item.status === "warning" ? "warning" : "ok"}`}>
-                  {item.status === "warning" ? "告警" : "正常"}
-                </span>
-                <small>{formatDateTime(item.generated_at)}</small>
-              </div>
-              <p>{`问题 ${issueCount} · 时序冲突 ${temporal} · 伏笔超期 ${foreshadow}`}</p>
-            </article>
-          );
-        })}
-      </div>
-      <div className="timeline-list">
-        <div className="timeline-list-head">
-          <strong>时序图谱</strong>
-          <small>{`第 ${sliderValue} 章`}</small>
-        </div>
-        <label className="timeline-slider" htmlFor="timeline-chapter-slider">
-          <span>{`章节滑块 1-${Math.max(1, maxChapterIndex)}`}</span>
-          <input
-            id="timeline-chapter-slider"
-            type="range"
-            min={1}
-            max={Math.max(1, maxChapterIndex)}
-            value={sliderValue}
-            onChange={(event) => setGraphTimelineChapterIndex(Number(event.target.value || 1))}
-            disabled={graphTimelineLoading}
-          />
-        </label>
-        <div className="timeline-filter-row">
-          <label className="timeline-filter-field" htmlFor="timeline-entity-filter">
-            <span>实体检索</span>
-            <input
-              id="timeline-entity-filter"
-              type="search"
-              placeholder="人物/物品/地名"
-              value={timelineEntityQuery}
-              onChange={(event) => setTimelineEntityQuery(event.target.value)}
-              disabled={graphTimelineLoading}
-            />
-          </label>
-          <label className="timeline-filter-field" htmlFor="timeline-relation-filter">
-            <span>关系类型</span>
-            <select
-              id="timeline-relation-filter"
-              value={timelineRelationFilter}
-              onChange={(event) => setTimelineRelationFilter(event.target.value)}
-              disabled={graphTimelineLoading}
-            >
-              <option value="all">全部关系</option>
-              {timelineRelationOptions.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        {graphTimelineLoading ? <p className="empty">图谱加载中...</p> : null}
-        {!graphTimelineLoading && graphNodes.length === 0 ? (
-          <p className="empty">{hasTimelineFilter ? "筛选后暂无可视化关系" : "该章节暂无可视化关系"}</p>
-        ) : null}
-        {!graphTimelineLoading && graphNodes.length > 0 ? (
-          <svg
-            className="timeline-graph"
-            viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`}
-            role="img"
-            aria-label="章节时序图谱"
-          >
-            {graphEdges.map((edge) => {
-              const source = graphLayout.positions[edge.source];
-              const target = graphLayout.positions[edge.target];
-              if (!source || !target) return null;
-              const previewChange = hasPreviewOverlay
-                ? previewEdgeChangeMap.get(buildGraphPreviewEdgeKey(edge.source, edge.relation, edge.target))
-                : null;
-              const isPreviewGhostEdge = String(edge.id || "").startsWith("preview:");
-              const edgeClassName = hasPreviewOverlay
-                ? previewChange
-                  ? `timeline-edge preview-${resolveBlastRadiusTone(previewChange)}${
-                      isPreviewGhostEdge ? " is-preview-ghost" : ""
-                    }`
-                  : "timeline-edge is-dim"
-                : selectedTimelineNodeId
-                  ? highlightedEdgeIdSet.has(edge.id)
-                    ? "timeline-edge is-linked"
-                    : "timeline-edge is-dim"
-                  : "timeline-edge";
-              return (
-                <line
-                  key={edge.id}
-                  className={edgeClassName}
-                  x1={source.x}
-                  y1={source.y}
-                  x2={target.x}
-                  y2={target.y}
-                >
-                  <title>{`${edge.source} -[${edge.relation}]-> ${edge.target}`}</title>
-                </line>
-              );
-            })}
-            {graphNodes.map((node) => {
-              const point = graphLayout.positions[node.id];
-              if (!point) return null;
-              const isSelected = selectedTimelineNodeId === node.id;
-              const isNeighbor = highlightedNodeIdSet.has(node.id);
-              const previewChange = hasPreviewOverlay
-                ? previewNodeChangeMap.get(normalizeGraphPreviewToken(node.id || node.label))
-                : null;
-              const previewTone = previewChange ? resolveBlastRadiusTone(previewChange) : null;
-              const nodeClassName = hasPreviewOverlay
-                ? previewTone
-                  ? `timeline-node preview-${previewTone}${node.kind === "preview" ? " is-preview-ghost" : ""}`
-                  : "timeline-node is-dim"
-                : selectedTimelineNodeId
-                  ? isSelected
-                    ? "timeline-node is-active"
-                    : isNeighbor
-                      ? "timeline-node is-neighbor"
-                      : "timeline-node is-dim"
-                  : "timeline-node";
-              const toggleNodeHighlight = () => {
-                setSelectedTimelineNodeId((prev) => (prev === node.id ? null : node.id));
-              };
-              return (
-                <g
-                  key={node.id}
-                  className={nodeClassName}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`高亮节点 ${node.label}`}
-                  onClick={toggleNodeHighlight}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
-                      toggleNodeHighlight();
-                    }
-                  }}
-                >
-                  <circle cx={point.x} cy={point.y} r={10 + Math.min(4, Number(node.degree || 0))} />
-                  <text x={point.x} y={point.y + 21} textAnchor="middle">
-                    {node.label}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-        ) : null}
-        {hasBlastRadiusPanel ? (
-          <div className="timeline-preview-bar blast-radius-panel" aria-live="polite">
-            <div className="blast-radius-head">
-              <strong>动作爆炸半径</strong>
-              <small>{activeBlastAction ? `#${activeBlastAction.id} · ${previewActionLabel}` : "待选择动作"}</small>
-            </div>
-            <div className="blast-radius-summary">
-              {previewBlastRadiusChips.length > 0
-                ? previewBlastRadiusChips.map((item) => (
-                    <span key={item.key} className={`blast-radius-chip is-${item.tone}`}>
-                      {item.label}
-                    </span>
-                  ))
-                : <span className="blast-radius-chip is-update">仅锚点波及</span>}
-            </div>
-            <div className="blast-radius-legend">
-              <span className="blast-radius-chip is-add">新增 / 投影</span>
-              <span className="blast-radius-chip is-update">更新 / 波及</span>
-              <span className="blast-radius-chip is-delete">删除 / 置换</span>
-            </div>
-            <div className="blast-radius-node-list">
-              {(previewBlastRadius?.nodes ?? []).slice(0, 8).map((item) => (
-                <span
-                  key={`${item.id}-${item.label}`}
-                  className={`blast-radius-node-pill is-${resolveBlastRadiusTone(item.change)}${item.in_current_graph ? "" : " is-ghost"}`}
-                  title={`${item.role || "related"} · ${item.in_current_graph ? "已存在节点" : "投影节点"}`}
-                >
-                  {item.label}
-                </span>
-              ))}
-            </div>
-            {graphPreviewTruncated ? (
-              <small className="blast-radius-truncation">
-                {`图谱已截断显示：节点仅展示 ${Math.min(graphNodeLimit, graphNodesCandidateCount)}/${graphNodesCandidateCount}，边仅展示 ${Math.min(graphEdgeLimit, graphEdgesCandidateCount)}/${graphEdgesCandidateCount}。可用上方筛选缩小范围。`}
-              </small>
-            ) : null}
-            {previewBlastRadiusSummary ? <small>{previewBlastRadiusSummary}</small> : null}
-            {previewBlastRadius?.notes?.[0] ? <small>{previewBlastRadius.notes[0]}</small> : null}
-            <BlastRadiusDetailDisclosure
-              preview={previewBlastRadius}
-              resetKey={activeBlastAction?.id ?? "none"}
-              summaryLabel="查看明细"
-            />
-          </div>
-        ) : selectedTimelineNodeId ? (
-          <div className="timeline-focus-bar">
-            <small>{`已高亮：${selectedTimelineNodeLabel}`}</small>
-            <button
-              type="button"
-              className="btn ghost tiny"
-              onClick={() => setSelectedTimelineNodeId(null)}
-              disabled={graphTimelineLoading}
-            >
-              清除高亮
-            </button>
-          </div>
-        ) : null}
-        <small className="timeline-meta">{`当前 节点 ${timelineNodesCount}/${timelineNodesTotal} · 边 ${timelineEdgesCount}/${timelineEdgesTotal}`}</small>
-      </div>
-      <div className="action-list">
-        {sortedActions.length === 0 ? <p className="empty">暂无动作记录</p> : null}
-        {sortedActions.map((action) => (
-          <ActionCard
-            key={action.id}
-            action={action}
-            isPending={pendingActionSet.has(action.id)}
-            isPreviewActive={hoveredActionId === action.id || (hoveredActionId === null && selectedActionId === action.id)}
-            controlsDisabled={mutatingActionId !== null}
-            onLoadLogs={onLoadLogs}
-            onPreviewEnter={setHoveredActionId}
-            onMutateAction={onMutateAction}
-          />
-        ))}
-      </div>
-
-      <ActionLogsList selectedActionId={selectedActionId} actionLogs={actionLogs} />
-    </section>
-  );
-});
-
-type AssistantDrawerProps = {
-  projectId: number;
-  assistantDrawerOpen: boolean;
-  onOpenAssistantDrawer: () => void;
-  onCloseAssistantDrawer: () => void;
-  onStartNewSession: () => void;
-  onSwitchSession: (sessionId: number) => Promise<void>;
-  onRenameSession: () => Promise<void>;
-  onDeleteSession: () => Promise<void>;
-  assistantDrawerRef: { current: HTMLElement | null };
-  sessionId: number | null;
-  projectSessions: ChatSessionSummary[];
-  usage: Record<string, unknown> | null;
-  messages: UiMessage[];
-  settings: SettingEntry[];
-  cards: StoryCard[];
-  input: string;
-  streaming: boolean;
-  composerInputRef: { current: HTMLTextAreaElement | null };
-  setInput: (value: string) => void;
-  onSend: () => Promise<void>;
-  sortedActions: ChatAction[];
-  pendingActionIds: number[];
-  mutatingActionId: number | null;
-  streamLatencySamples: StreamLatencySample[];
-  tokenUsageSamples: TokenUsageSample[];
-  retrievalHitSamples: RetrievalHitSample[];
-  consistencyAudits: ConsistencyAuditReport[];
-  consistencyAuditRunning: boolean;
-  traceEvents: ChatStreamTraceEvent[];
-  graphTimeline: GraphTimelineSnapshot | null;
-  graphTimelineLoading: boolean;
-  graphTimelineChapterIndex: number;
-  maxChapterIndex: number;
-  setGraphTimelineChapterIndex: (chapterIndex: number) => void;
-  selectedActionId: number | null;
-  actionLogs: ActionAuditLog[];
-  onLoadLogs: (actionId: number) => Promise<void>;
-  onMutateAction: (action: ChatAction, decision: "apply" | "reject" | "undo") => Promise<void>;
-  onRunConsistencyAudit: () => Promise<void>;
-};
-
-const AssistantDrawer = memo(function AssistantDrawer({
-  projectId,
-  assistantDrawerOpen,
-  onOpenAssistantDrawer,
-  onCloseAssistantDrawer,
-  onStartNewSession,
-  onSwitchSession,
-  onRenameSession,
-  onDeleteSession,
-  assistantDrawerRef,
-  sessionId,
-  projectSessions,
-  usage,
-  messages,
-  settings,
-  cards,
-  input,
-  streaming,
-  composerInputRef,
-  setInput,
-  onSend,
-  sortedActions,
-  pendingActionIds,
-  mutatingActionId,
-  streamLatencySamples,
-  tokenUsageSamples,
-  retrievalHitSamples,
-  consistencyAudits,
-  consistencyAuditRunning,
-  traceEvents,
-  graphTimeline,
-  graphTimelineLoading,
-  graphTimelineChapterIndex,
-  maxChapterIndex,
-  setGraphTimelineChapterIndex,
-  selectedActionId,
-  actionLogs,
-  onLoadLogs,
-  onMutateAction,
-  onRunConsistencyAudit,
-}: AssistantDrawerProps) {
-  const [sideTab, setSideTab] = useState<"actions" | "candidates">("actions");
-
-  useEffect(() => {
-    if (!assistantDrawerOpen) {
-      setSideTab("actions");
-    }
-  }, [assistantDrawerOpen]);
-
-  const handleSessionChange = (value: string) => {
-    const raw = value.trim();
-    if (!raw) {
-      onStartNewSession();
-      return;
-    }
-    const nextSessionId = Number(raw);
-    if (!Number.isFinite(nextSessionId) || nextSessionId <= 0) return;
-    if (sessionId === nextSessionId) return;
-    void onSwitchSession(nextSessionId);
-  };
-
-  return (
-    <>
-      <button
-        type="button"
-        className="assistant-fab"
-        onClick={onOpenAssistantDrawer}
-        aria-haspopup="dialog"
-        aria-expanded={assistantDrawerOpen}
-        aria-controls="assistant-drawer"
-      >
-        助手
-      </button>
-      <div
-        className={`assistant-drawer-backdrop ${assistantDrawerOpen ? "open" : ""}`}
-        role="presentation"
-        aria-hidden={!assistantDrawerOpen}
-        onClick={onCloseAssistantDrawer}
-      />
-      <aside
-        id="assistant-drawer"
-        ref={assistantDrawerRef}
-        className={`assistant-drawer ${assistantDrawerOpen ? "open" : ""}`}
-        role="dialog"
-        aria-modal={assistantDrawerOpen ? true : undefined}
-        aria-labelledby="assistant-drawer-title"
-        aria-describedby="assistant-drawer-desc"
-        aria-hidden={!assistantDrawerOpen}
-        tabIndex={-1}
-      >
-        <div className="assistant-drawer-top">
-          <div>
-            <h2 id="assistant-drawer-title">助手抽屉</h2>
-            <small id="assistant-drawer-desc">默认折叠，按 `Ctrl/Cmd + Shift + A` 快速呼出</small>
-            <div className="assistant-session-switch">
-              <label htmlFor="assistant-session-select">会话</label>
-              <select
-                id="assistant-session-select"
-                value={sessionId ?? ""}
-                onChange={(event) => handleSessionChange(event.target.value)}
-                disabled={streaming}
-              >
-                <option value="">新会话（未创建）</option>
-                {projectSessions.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {`${item.title || `会话 #${item.id}`} · ${formatDateTime(item.updated_at)}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="assistant-drawer-top-actions">
-            <button
-              type="button"
-              className="btn ghost tiny"
-              onClick={onStartNewSession}
-              disabled={streaming}
-            >
-              新会话
-            </button>
-            {sessionId ? (
-              <>
-                <button
-                  type="button"
-                  className="btn ghost tiny"
-                  onClick={() => void onRenameSession()}
-                  disabled={streaming}
-                >
-                  重命名
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost tiny"
-                  onClick={() => void onDeleteSession()}
-                  disabled={streaming}
-                >
-                  删除会话
-                </button>
-              </>
-            ) : null}
-            <button
-              type="button"
-              className="btn ghost tiny"
-              onClick={onCloseAssistantDrawer}
-              aria-label="关闭助手抽屉"
-            >
-              关闭
-            </button>
-          </div>
-        </div>
-
-        <div className="assistant-drawer-grid">
-          <AssistantChatPanel
-            usage={usage}
-            messages={messages}
-            settings={settings}
-            cards={cards}
-            input={input}
-            streaming={streaming}
-            composerInputRef={composerInputRef}
-            setInput={setInput}
-            onSend={onSend}
-          />
-
-          <div className="assistant-tools-column">
-            <div className="assistant-tools-tabs">
-              <button
-                type="button"
-                className={`btn ghost tiny ${sideTab === "actions" ? "active" : ""}`}
-                onClick={() => setSideTab("actions")}
-              >
-                动作提议
-              </button>
-              <button
-                type="button"
-                className={`btn ghost tiny ${sideTab === "candidates" ? "active" : ""}`}
-                onClick={() => setSideTab("candidates")}
-              >
-                候选审核
-              </button>
-            </div>
-
-            {sideTab === "actions" ? (
-              <AssistantActionsPanel
-                sortedActions={sortedActions}
-                pendingActionIds={pendingActionIds}
-                mutatingActionId={mutatingActionId}
-                streamLatencySamples={streamLatencySamples}
-                tokenUsageSamples={tokenUsageSamples}
-                retrievalHitSamples={retrievalHitSamples}
-                consistencyAudits={consistencyAudits}
-                consistencyAuditRunning={consistencyAuditRunning}
-                traceEvents={traceEvents}
-                graphTimeline={graphTimeline}
-                graphTimelineLoading={graphTimelineLoading}
-                graphTimelineChapterIndex={graphTimelineChapterIndex}
-                maxChapterIndex={maxChapterIndex}
-                setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
-                selectedActionId={selectedActionId}
-                actionLogs={actionLogs}
-                onLoadLogs={onLoadLogs}
-                onMutateAction={onMutateAction}
-                onRunConsistencyAudit={onRunConsistencyAudit}
-              />
-            ) : (
-              <Suspense
-                fallback={
-                  <LazyPanelFallback
-                    className="panel side-panel candidate-review-panel"
-                    title="候选列表查询 / 批量审核"
-                    detail="正在加载候选审核面板..."
-                  />
-                }
-              >
-                <LazyGraphCandidateReviewPanel projectId={projectId} />
-              </Suspense>
-            )}
-          </div>
-        </div>
-      </aside>
-    </>
-  );
-});
 
 export default function App() {
   const {
-    uiMode,
+    assistantDrawerOpen,
+    advancedPanelOpen,
+    assistantSection,
     projectId,
     model,
     povMode,
@@ -3213,7 +209,9 @@ export default function App() {
     evidence,
   } = useChatStore(
     useShallow((state) => ({
-      uiMode: state.uiMode,
+      assistantDrawerOpen: state.assistantDrawerOpen,
+      advancedPanelOpen: state.advancedPanelOpen,
+      assistantSection: state.assistantSection,
       projectId: state.projectId,
       model: state.model,
       povMode: state.povMode,
@@ -3237,7 +235,9 @@ export default function App() {
   );
 
   const {
-    setUiMode,
+    setAssistantDrawerOpen: setAssistantDrawerOpenState,
+    setAdvancedPanelOpen,
+    setAssistantSection,
     setProjectId,
     setModel,
     setPovMode,
@@ -3263,7 +263,9 @@ export default function App() {
     resetSessionState,
   } = useChatStore(
     useShallow((state) => ({
-      setUiMode: state.setUiMode,
+      setAssistantDrawerOpen: state.setAssistantDrawerOpen,
+      setAdvancedPanelOpen: state.setAdvancedPanelOpen,
+      setAssistantSection: state.setAssistantSection,
       setProjectId: state.setProjectId,
       setModel: state.setModel,
       setPovMode: state.setPovMode,
@@ -3289,6 +291,8 @@ export default function App() {
       resetSessionState: state.resetSessionState,
     }))
   );
+
+  const { theme, setTheme } = useTheme();
 
   const [input, setInput] = useState("");
   const [projectSessions, setProjectSessions] = useState<ChatSessionSummary[]>([]);
@@ -3338,15 +342,11 @@ export default function App() {
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
   const [selectedModelProfileId, setSelectedModelProfileId] = useState<string | null>(null);
   const [activeModelProfileId, setActiveModelProfileId] = useState<string | null>(null);
-  const [ghostModelProfileId, setGhostModelProfileId] = useState<string | null>(null);
+  const [suggestionModelProfileId, setSuggestionModelProfileId] = useState<string | null>(null);
   const [chatTemperatureProfile, setChatTemperatureProfile] = useState<"action" | "chat" | "brainstorm">("chat");
-  const [ghostTemperatureProfile, setGhostTemperatureProfile] = useState<"ghost" | "chat" | "action" | "brainstorm">(
-    "ghost"
+  const [suggestionTemperatureProfile, setSuggestionTemperatureProfile] = useState<"suggestion" | "chat" | "action" | "brainstorm">(
+    "suggestion"
   );
-  const [ghostAutoEnabled, setGhostAutoEnabled] = useState(false);
-  const [ghostLoading, setGhostLoading] = useState(false);
-  const [ghostText, setGhostText] = useState("");
-  const [ghostError, setGhostError] = useState<string | null>(null);
   const [modelProfileDraftIdInput, setModelProfileDraftIdInput] = useState("");
   const [modelProfileName, setModelProfileName] = useState("");
   const [modelProfileProvider, setModelProfileProvider] = useState<
@@ -3370,7 +370,6 @@ export default function App() {
     snapshot: false,
   });
   const [zenMode, setZenMode] = useState(false);
-  const [assistantDrawerOpen, setAssistantDrawerOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [lastStreamMetrics, setLastStreamMetrics] = useState<ChatStreamTimingMetrics | null>(null);
   const [streamLatencySamples, setStreamLatencySamples] = useState<StreamLatencySample[]>([]);
@@ -3390,28 +389,17 @@ export default function App() {
   const settingsDialogReturnFocusRef = useRef<HTMLElement | null>(null);
   const previousAssistantDrawerOpenRef = useRef(false);
   const previousSettingsDialogOpenRef = useRef(false);
-  const ghostRequestRef = useRef(0);
-  const ghostRequestCacheKeyRef = useRef("");
-  const ghostSocketRef = useRef<WebSocket | null>(null);
-  const acceptGhostTextRef = useRef<(() => void) | null>(null);
-  const acceptGhostWordRef = useRef<(() => void) | null>(null);
-  const rejectGhostTextRef = useRef<(() => void) | null>(null);
-  const regenerateGhostTextRef = useRef<(() => void) | null>(null);
   const writingShortcutStateRef = useRef<{
-    uiMode: typeof uiMode;
+    advancedPanelOpen: boolean;
     assistantDrawerOpen: boolean;
     settingsDialogOpen: boolean;
-    hasGhostText: boolean;
-    ghostLoading: boolean;
     draftLoading: boolean;
     draftSaving: boolean;
     activeChapterId: number | null;
   }>({
-    uiMode,
+    advancedPanelOpen,
     assistantDrawerOpen: false,
     settingsDialogOpen: false,
-    hasGhostText: false,
-    ghostLoading: false,
     draftLoading: false,
     draftSaving: false,
     activeChapterId: null,
@@ -3428,157 +416,16 @@ export default function App() {
     content: "",
   });
 
-  const ghostModelProfileStorageKey = useMemo(() => {
-    return `novel-platform:ghost-model-profile:v1:${projectId}`;
-  }, [projectId]);
-  const chatTemperatureProfileStorageKey = useMemo(() => {
-    return `novel-platform:chat-temperature-profile:v1:${projectId}`;
-  }, [projectId]);
-  const ghostTemperatureProfileStorageKey = useMemo(() => {
-    return `novel-platform:ghost-temperature-profile:v1:${projectId}`;
-  }, [projectId]);
-  const ghostAutoEnabledStorageKey = useMemo(() => {
-    return `novel-platform:ghost-auto-enabled:v1:${projectId}`;
-  }, [projectId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    let stored: string | null = null;
-    try {
-      const raw = window.localStorage.getItem(ghostModelProfileStorageKey);
-      stored = raw && raw.trim() ? raw.trim() : null;
-    } catch {
-      stored = null;
-    }
-    if (stored && !modelProfiles.some((item) => item.profile_id === stored)) {
-      stored = null;
-    }
-    setGhostModelProfileId(stored);
-  }, [ghostModelProfileStorageKey, modelProfiles]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      if (!ghostModelProfileId) {
-        window.localStorage.removeItem(ghostModelProfileStorageKey);
-        return;
-      }
-      window.localStorage.setItem(ghostModelProfileStorageKey, ghostModelProfileId);
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [ghostModelProfileId, ghostModelProfileStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = (window.localStorage.getItem(chatTemperatureProfileStorageKey) || "").trim();
-      if (raw === "action" || raw === "chat" || raw === "brainstorm") {
-        setChatTemperatureProfile(raw);
-      }
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [chatTemperatureProfileStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(chatTemperatureProfileStorageKey, chatTemperatureProfile);
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [chatTemperatureProfile, chatTemperatureProfileStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = (window.localStorage.getItem(ghostTemperatureProfileStorageKey) || "").trim();
-      if (raw === "ghost" || raw === "chat" || raw === "action" || raw === "brainstorm") {
-        setGhostTemperatureProfile(raw);
-      }
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [ghostTemperatureProfileStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(ghostTemperatureProfileStorageKey, ghostTemperatureProfile);
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [ghostTemperatureProfile, ghostTemperatureProfileStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = (window.localStorage.getItem(ghostAutoEnabledStorageKey) || "").trim().toLowerCase();
-      if (raw === "1" || raw === "true" || raw === "on") {
-        setGhostAutoEnabled(true);
-      } else if (raw === "0" || raw === "false" || raw === "off") {
-        setGhostAutoEnabled(false);
-      }
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [ghostAutoEnabledStorageKey]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(ghostAutoEnabledStorageKey, ghostAutoEnabled ? "on" : "off");
-    } catch {
-      // ignore localStorage quota/permission failures
-    }
-  }, [ghostAutoEnabled, ghostAutoEnabledStorageKey]);
-
-  const ghostTextShortcutExtension = useMemo(() => {
-    return Extension.create({
-      name: "ghostTextShortcuts",
-      addKeyboardShortcuts() {
-        const canRun = () => {
-          const state = writingShortcutStateRef.current;
-          if (!state) return false;
-          if (state.uiMode !== "writing") return false;
-          if (state.assistantDrawerOpen || state.settingsDialogOpen) return false;
-          if (!state.activeChapterId) return false;
-          if (state.draftLoading || state.draftSaving) return false;
-          return true;
-        };
-
-        return {
-          Tab: () => {
-            if (!canRun()) return false;
-            const state = writingShortcutStateRef.current;
-            if (!state?.hasGhostText || state.ghostLoading) return false;
-            acceptGhostTextRef.current?.();
-            return true;
-          },
-          "Ctrl-ArrowRight": () => {
-            if (!canRun()) return false;
-            const state = writingShortcutStateRef.current;
-            if (!state?.hasGhostText || state.ghostLoading) return false;
-            acceptGhostWordRef.current?.();
-            return true;
-          },
-          Escape: () => {
-            if (!canRun()) return false;
-            const state = writingShortcutStateRef.current;
-            if (!state?.hasGhostText) return false;
-            rejectGhostTextRef.current?.();
-            return true;
-          },
-          "Mod-Shift-Enter": () => {
-            if (!canRun()) return false;
-            regenerateGhostTextRef.current?.();
-            return true;
-          },
-        };
-      },
-    });
-  }, []);
+  useSettingsStorage({
+    projectId,
+    modelProfiles,
+    suggestionModelProfileId,
+    setSuggestionModelProfileId,
+    chatTemperatureProfile,
+    setChatTemperatureProfile,
+    suggestionTemperatureProfile,
+    setSuggestionTemperatureProfile,
+  });
 
   const typewriterRafRef = useRef<number | null>(null);
   const typewriterModeEnabledRef = useRef(typewriterModeEnabled);
@@ -3700,14 +547,19 @@ export default function App() {
   const canMoveChapterDown = activeChapterPos >= 0 && activeChapterPos < chapters.length - 1;
   const chapterOutlines = useMemo<ChapterOutlineEntry[]>(
     () => {
+      let maxWords = 1;
       const baseEntries = chapters.map((chapter) => {
-        const cleaned = (chapter.content || "").replace(/\s+/g, "");
-        const wordCount = cleaned.length;
-        const previewLine = (chapter.content || "")
-          .split("\n")
-          .map((line) => line.trim())
-          .find((line) => line.length > 0);
-        const preview = previewLine ? previewLine.slice(0, 42) : "（暂无正文）";
+        const wordCount = (chapter.content || "").replace(/\s+/g, "").length;
+        if (wordCount > maxWords) maxWords = wordCount;
+        const lines = (chapter.content || "").split("\n");
+        let preview = "（暂无正文）";
+        for (let i = 0; i < lines.length; i++) {
+          const trimmed = lines[i].trim();
+          if (trimmed.length > 0) {
+            preview = trimmed.slice(0, 42);
+            break;
+          }
+        }
         return {
           id: chapter.id,
           chapterIndex: chapter.chapter_index,
@@ -3718,7 +570,6 @@ export default function App() {
           progressPercent: 0,
         };
       });
-      const maxWords = Math.max(1, ...baseEntries.map((item) => item.wordCount));
       return baseEntries.map((item) => ({
         ...item,
         progressPercent: item.wordCount <= 0 ? 0 : Math.max(4, Math.round((item.wordCount / maxWords) * 100)),
@@ -3779,7 +630,7 @@ export default function App() {
     }
     return "";
   }, [messages]);
-  const ghostChapterGoal = useMemo(() => {
+  const suggestionChapterGoal = useMemo(() => {
     const selectedBeat =
       sceneBeats.find((item) => item.id === activeSceneBeatId) ??
       sceneBeats.find((item) => item.status !== "done") ??
@@ -3792,7 +643,7 @@ export default function App() {
     if (!chapterTitle) return beatGoal.slice(0, 220);
     return `${chapterTitle}：${beatGoal}`.slice(0, 220);
   }, [sceneBeats, activeSceneBeatId, activeChapter?.title]);
-  const ghostActiveRoles = useMemo(() => {
+  const suggestionActiveRoles = useMemo(() => {
     const roleHints = ["role", "character", "人物", "角色", "主角", "配角", "反派"];
     const picked: string[] = [];
     const seen = new Set<string>();
@@ -3840,8 +691,9 @@ export default function App() {
     () => promptTemplates.find((item) => item.id === activePromptTemplateId) ?? null,
     [promptTemplates, activePromptTemplateId]
   );
-  const debugPromptPanelReady = uiMode === "pro";
-  const proSnapshotPanelReady = uiMode === "pro";
+  const isWritingWorkspace = !advancedPanelOpen;
+  const debugPromptPanelReady = advancedPanelOpen;
+  const proSnapshotPanelReady = advancedPanelOpen;
   const referenceProjectIds = useMemo(
     () => parseReferenceProjectIds(referenceProjectInput, projectId),
     [referenceProjectInput, projectId]
@@ -3906,8 +758,8 @@ export default function App() {
     return Math.min(2, Math.max(0, parsed));
   }, [temperatureOverrideInput]);
   const awarenessTags = useMemo(
-    () => collectAwarenessTags(evidence, { includeDebugSignals: uiMode === "pro" }),
-    [evidence, uiMode]
+    () => collectAwarenessTags(evidence, { includeDebugSignals: advancedPanelOpen }),
+    [advancedPanelOpen, evidence]
   );
 
   useEffect(() => {
@@ -3980,8 +832,6 @@ export default function App() {
         placeholder:
           "在这里写正文。你可以选中一段文字后让 AI 润色/扩写，也可以把助手回复一键写回正文。",
       }),
-      GhostTextExtension,
-      ghostTextShortcutExtension,
       EntityInlineHintExtension,
       SemanticDiffExtension,
     ],
@@ -4120,8 +970,6 @@ export default function App() {
           clearDraftRecoverySnapshot(nextProjectId, chapter.id);
         }
       }
-      setGhostText("");
-      setGhostError(null);
     } finally {
       if (chapterSnapshotInFlightRef.current.get(cacheKey) === snapshotPromise) {
         chapterSnapshotInFlightRef.current.delete(cacheKey);
@@ -4209,7 +1057,6 @@ export default function App() {
     setDraftSaving,
     setActiveChapterId,
     setError,
-    setGhostError,
     setDraftTitle,
     setDraftVersion,
     setDraftUpdatedAt,
@@ -4317,15 +1164,6 @@ export default function App() {
 
   useEffect(() => {
     if (!editor) return;
-    if (ghostText.trim()) {
-      editor.commands.setGhostText(ghostText);
-      return;
-    }
-    editor.commands.clearGhostText();
-  }, [editor, ghostText]);
-
-  useEffect(() => {
-    if (!editor) return;
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ action?: string; id?: string }>).detail;
       if (!detail?.id) return;
@@ -4350,13 +1188,13 @@ export default function App() {
 
   useEffect(() => {
     typewriterDimmingEnabledRef.current =
-      uiMode === "writing" && typewriterModeEnabled && (draftFocusMode || zenMode);
+      isWritingWorkspace && typewriterModeEnabled && (draftFocusMode || zenMode);
     if (!editor) {
       clearTypewriterParagraphFocus();
       return;
     }
     syncTypewriterParagraphFocus(editor);
-  }, [editor, uiMode, typewriterModeEnabled, draftFocusMode, zenMode, activeChapterId]);
+  }, [editor, isWritingWorkspace, typewriterModeEnabled, draftFocusMode, zenMode, activeChapterId]);
 
   useEffect(() => {
     return () => {
@@ -4381,199 +1219,39 @@ export default function App() {
   }, [editor, typewriterModeEnabled, activeChapterId]);
 
   useEffect(() => {
-    if (uiMode === "writing") return;
+    if (isWritingWorkspace) return;
     if (!zenMode) return;
     setZenMode(false);
-  }, [uiMode, zenMode]);
+  }, [isWritingWorkspace, zenMode]);
 
-  const buildGhostCacheKey = () => {
-    const tail = draftText.slice(Math.max(0, draftText.length - 320));
-    const promptPart = activePromptTemplateId ?? 0;
-    const rolesPart = ghostActiveRoles.join(",");
-    return [
-      projectId,
-      activeChapterId ?? 0,
-      activeSceneBeatId ?? 0,
-      promptPart,
-      (ghostModelProfileId ?? activeModelProfileId) ?? "no-profile",
-      model.trim() || "default",
-      ghostTemperatureProfile,
-      temperatureOverride ?? "auto",
-      ghostChapterGoal || "no-goal",
-      rolesPart || "no-roles",
-      tail,
-    ].join("|");
-  };
-
-  const requestGhostSuggestion = async (forceRefresh = false) => {
-    if (!editor || !activeChapterId || draftLoading) {
-      setGhostText("");
-      setGhostError(null);
-      setGhostLoading(false);
-      return;
-    }
-    const { from, to, empty } = editor.state.selection;
-    if (!empty) {
-      setGhostText("");
-      setGhostError(null);
-      setGhostLoading(false);
-      return;
-    }
-
-    const prefix = editor.state.doc.textBetween(1, from, "\n", "\n");
-    const suffix = editor.state.doc.textBetween(to, editor.state.doc.content.size, "\n", "\n");
-    const nextCacheKey = `${buildGhostCacheKey()}|${prefix.slice(-120)}|${suffix.slice(0, 80)}`;
-    if (!forceRefresh && !prefix.trim()) {
-      setGhostText("");
-      setGhostError(null);
-      setGhostLoading(false);
-      return;
-    }
-    if (!forceRefresh && ghostText.trim() && nextCacheKey === ghostRequestCacheKeyRef.current) {
-      return;
-    }
-
-    ghostRequestRef.current += 1;
-    const requestId = ghostRequestRef.current;
-    const requestCacheKey = nextCacheKey;
-    ghostSocketRef.current?.close();
-    setGhostLoading(true);
-    setGhostText("");
-    setGhostError(null);
-
-    let streamed = "";
-    const socket = openGhostTextSocket(
-      (event: GhostTextStreamEvent) => {
-        if (ghostSocketRef.current !== socket || ghostRequestRef.current !== requestId) return;
-        if (event.type === "start") {
-          streamed = "";
-          setGhostText("");
-          return;
-        }
-        if (event.type === "delta") {
-          streamed += event.text || "";
-          setGhostText(streamed);
-          return;
-        }
-        if (event.type === "done") {
-          const finalText = String(event.text || streamed || "").trim();
-          setGhostText(finalText);
-          setGhostError(null);
-          setGhostLoading(false);
-          ghostRequestCacheKeyRef.current = requestCacheKey;
-          return;
-        }
-        if (event.type === "error") {
-          setGhostText("");
-          setGhostError(event.message || "Ghost Text 生成失败");
-          setGhostLoading(false);
-        }
-      },
-      {
-        onOpen: () => {
-          if (ghostSocketRef.current !== socket || ghostRequestRef.current !== requestId) return;
-          sendGhostTextStreamRequest(socket, {
-            project_id: projectId,
-            chapter_id: activeChapterId,
-            scene_beat_id: activeSceneBeatId,
-            prompt_template_id: activePromptTemplateId,
-            prefix,
-            suffix,
-            chapter_goal: ghostChapterGoal || null,
-            active_roles: ghostActiveRoles,
-            model: model.trim() ? model.trim() : null,
-            model_profile_id: ghostModelProfileId,
-            style_guard: true,
-            temperature_profile: ghostTemperatureProfile,
-            temperature_override: temperatureOverride,
-          });
-        },
-        onClose: () => {
-          if (ghostSocketRef.current === socket) {
-            ghostSocketRef.current = null;
-            setGhostLoading(false);
-          }
-        },
-        onError: () => {
-          if (ghostSocketRef.current === socket) {
-            setGhostError("Ghost Text 连接失败");
-            setGhostLoading(false);
-          }
-        },
-      }
-    );
-    ghostSocketRef.current = socket;
-  };
-
-
-  useEffect(() => {
-    if (!ghostAutoEnabled) {
-      ghostSocketRef.current?.close();
-      setGhostText("");
-      setGhostError(null);
-      setGhostLoading(false);
-      return;
-    }
-    if (!activeChapterId || draftLoading || !editor || streaming) {
-      ghostSocketRef.current?.close();
-      setGhostText("");
-      setGhostError(null);
-      setGhostLoading(false);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void requestGhostSuggestion(false);
-    }, 1500);
-    return () => window.clearTimeout(timer);
-  }, [
-    activeChapterId,
-    activeSceneBeatId,
-    draftText,
-    draftLoading,
-    editor,
-    projectId,
-    activePromptTemplateId,
-    activeModelProfileId,
-    model,
-    streaming,
-    ghostAutoEnabled,
-    ghostTemperatureProfile,
-    temperatureOverride,
-    ghostChapterGoal,
-    ghostActiveRoles,
-  ]);
-
-  useEffect(() => {
-    return () => {
-      ghostSocketRef.current?.close();
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (typewriterRafRef.current) {
-        window.cancelAnimationFrame(typewriterRafRef.current);
-        typewriterRafRef.current = null;
-      }
-    };
-  }, []);
-
-  const openSettingsDialog = () => {
+  const openSettingsDialog = useCallback(() => {
     if (!settingsDialogOpen && typeof document !== "undefined") {
       const active = document.activeElement;
       settingsDialogReturnFocusRef.current = active instanceof HTMLElement ? active : null;
     }
     setSettingsDialogOpen(true);
-  };
+  }, [settingsDialogOpen]);
 
-  const closeSettingsDialog = () => setSettingsDialogOpen(false);
+  const closeSettingsDialog = useCallback(() => setSettingsDialogOpen(false), []);
 
-  const toggleUiMode = () => {
-    setUiMode(uiMode === "writing" ? "pro" : "writing");
-  };
+  const setAssistantDrawerOpen = useCallback(
+    (next: boolean | ((prev: boolean) => boolean)) => {
+      const resolved = typeof next === "function" ? next(assistantDrawerOpen) : next;
+      setAssistantDrawerOpenState(resolved);
+    },
+    [assistantDrawerOpen, setAssistantDrawerOpenState]
+  );
 
-  const toggleZenMode = () => {
-    if (uiMode !== "writing") return;
+  const toggleAdvancedPanel = useCallback(() => {
+    const next = !advancedPanelOpen;
+    setAdvancedPanelOpen(next);
+    if (next) {
+      setAssistantDrawerOpen(false);
+    }
+  }, [advancedPanelOpen, setAdvancedPanelOpen, setAssistantDrawerOpen]);
+
+  const toggleZenMode = useCallback(() => {
+    if (advancedPanelOpen) return;
     setZenMode((prev) => {
       const next = !prev;
       if (next) {
@@ -4582,19 +1260,15 @@ export default function App() {
       }
       return next;
     });
-  };
+  }, [advancedPanelOpen, setAssistantDrawerOpen]);
 
-  const toggleTypewriterMode = () => {
+  const toggleTypewriterMode = useCallback(() => {
     setTypewriterModeEnabled((prev) => !prev);
-  };
+  }, []);
 
-  const toggleDraftFocusMode = () => {
+  const toggleDraftFocusMode = useCallback(() => {
     setDraftFocusMode((prev) => !prev);
-  };
-
-  const toggleGhostAuto = () => {
-    setGhostAutoEnabled((prev) => !prev);
-  };
+  }, []);
 
   const bindActiveChapterToVolume = async (volumeId: number) => {
     if (!activeChapterId) return;
@@ -4830,49 +1504,6 @@ export default function App() {
     setDraftText(readEditorText(editor));
     setSelectedDraftText("");
   };
-  const acceptGhostText = () => {
-    if (!editor || !ghostText.trim()) return;
-    const { from, to } = editor.state.selection;
-    const insertionContent = toEditorDoc(ghostText).content ?? [];
-    editor.chain().focus().insertContentAt({ from, to }, insertionContent).run();
-    setDraftText(readEditorText(editor));
-    setGhostText("");
-    setGhostError(null);
-    ghostRequestCacheKeyRef.current = "";
-    ghostSocketRef.current?.close();
-  };
-
-  const acceptGhostWord = () => {
-    if (!editor || !ghostText.trim()) return;
-    const nextWord = takeGhostWord(ghostText);
-    if (!nextWord) return;
-    const { from, to } = editor.state.selection;
-    const insertionContent = toEditorDoc(nextWord).content ?? [];
-    editor.chain().focus().insertContentAt({ from, to }, insertionContent).run();
-    setDraftText(readEditorText(editor));
-    const remaining = ghostText.slice(nextWord.length);
-    setGhostText(remaining);
-    setGhostError(null);
-  };
-
-  const rejectGhostText = () => {
-    setGhostText("");
-    setGhostError(null);
-    ghostRequestCacheKeyRef.current = "";
-    ghostSocketRef.current?.close();
-  };
-
-  const regenerateGhostText = async () => {
-    setGhostText("");
-    setGhostError(null);
-    ghostRequestCacheKeyRef.current = "";
-    ghostSocketRef.current?.close();
-    await requestGhostSuggestion(true);
-  };
-  acceptGhostTextRef.current = acceptGhostText;
-  acceptGhostWordRef.current = acceptGhostWord;
-  rejectGhostTextRef.current = rejectGhostText;
-  regenerateGhostTextRef.current = regenerateGhostText;
 
   const fillPromptFromSelection = async (mode: "polish" | "expand") => {
     if (!selectedDraftText) {
@@ -4883,36 +1514,30 @@ export default function App() {
       setError("当前会话正在生成中，请稍后再试。");
       return;
     }
-    if (ghostLoading) return;
 
-    setGhostLoading(true);
-    setGhostError(null);
     setError(null);
-
-    const requestId = ghostRequestRef.current + 1;
-    ghostRequestRef.current = requestId;
     try {
       const result =
         mode === "expand"
-          ? await generateGhostExpand({
+          ? await expandSelection({
               project_id: projectId,
               chapter_id: activeChapterId,
               scene_beat_id: activeSceneBeatId,
               prompt_template_id: activePromptTemplateId,
               text: selectedDraftText,
               model: model.trim() ? model.trim() : null,
-              model_profile_id: ghostModelProfileId,
+              model_profile_id: suggestionModelProfileId,
               temperature_profile: "chat",
               temperature_override: temperatureOverride,
             })
-          : await generateGhostPolish({
+          : await polishSelection({
               project_id: projectId,
               chapter_id: activeChapterId,
               scene_beat_id: activeSceneBeatId,
               prompt_template_id: activePromptTemplateId,
               text: selectedDraftText,
               model: model.trim() ? model.trim() : null,
-              model_profile_id: ghostModelProfileId,
+              model_profile_id: suggestionModelProfileId,
               temperature_profile: "chat",
               temperature_override: temperatureOverride,
             });
@@ -4932,14 +1557,8 @@ export default function App() {
         setError("润色/扩写结果与原文没有差异");
       }
     } catch (rewriteError) {
-      if (ghostRequestRef.current !== requestId) return;
       const message = rewriteError instanceof Error ? rewriteError.message : "润色/扩写失败";
-      setGhostError(message);
       setError(message);
-    } finally {
-      if (ghostRequestRef.current === requestId) {
-        setGhostLoading(false);
-      }
     }
   };
 
@@ -5026,13 +1645,13 @@ export default function App() {
     }
   };
 
-  const handleOutlineDragStart = (chapterId: number) => {
+  const handleOutlineDragStart = useCallback((chapterId: number) => {
     setDragChapterId(chapterId);
-  };
+  }, []);
 
-  const handleOutlineDragEnd = () => {
+  const handleOutlineDragEnd = useCallback(() => {
     setDragChapterId(null);
-  };
+  }, []);
 
   const reorderByDrag = async (targetChapterId: number) => {
     if (!dragChapterId || dragChapterId === targetChapterId) {
@@ -5416,15 +2035,13 @@ export default function App() {
   }, [modelProfiles, selectedModelProfileId]);
 
   const typewriterDimmingEnabled =
-    uiMode === "writing" && typewriterModeEnabled && (draftFocusMode || zenMode);
+    isWritingWorkspace && typewriterModeEnabled && (draftFocusMode || zenMode);
   typewriterDimmingEnabledRef.current = typewriterDimmingEnabled;
 
   writingShortcutStateRef.current = {
-    uiMode,
+    advancedPanelOpen,
     assistantDrawerOpen,
     settingsDialogOpen,
-    hasGhostText: ghostText.trim().length > 0,
-    ghostLoading,
     draftLoading,
     draftSaving,
     activeChapterId,
@@ -5434,13 +2051,13 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "z") {
-        if (uiMode !== "writing") return;
+        if (advancedPanelOpen) return;
         event.preventDefault();
         toggleZenMode();
         return;
       }
       if (event.key === "F11") {
-        if (uiMode !== "writing") return;
+        if (advancedPanelOpen) return;
         event.preventDefault();
         toggleZenMode();
         return;
@@ -5456,34 +2073,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [uiMode]);
-
-  useEffect(() => {
-    if (!editor) return;
-    const dom = editor.view.dom;
-    const onGhostWordShortcut = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (event.altKey || event.shiftKey || event.metaKey) return;
-      if (!event.ctrlKey || event.key !== "ArrowRight") return;
-
-      const state = writingShortcutStateRef.current;
-      if (!state) return;
-      if (state.uiMode !== "writing") return;
-      if (state.assistantDrawerOpen || state.settingsDialogOpen) return;
-      if (!state.activeChapterId) return;
-      if (state.draftLoading || state.draftSaving) return;
-      if (!state.hasGhostText || state.ghostLoading) return;
-
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      acceptGhostWordRef.current?.();
-    };
-
-    dom.addEventListener("keydown", onGhostWordShortcut, true);
-    return () => {
-      dom.removeEventListener("keydown", onGhostWordShortcut, true);
-    };
-  }, [editor]);
+  }, [advancedPanelOpen]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -5623,7 +2213,8 @@ export default function App() {
   const {
     toggleAssistantDrawer,
     closeAssistantDrawer,
-    openAssistantDrawerAndFocusComposer,
+    openAssistantDrawer,
+    focusAssistantComposer,
     startNewSession,
     switchSession,
     renameSession,
@@ -5635,6 +2226,7 @@ export default function App() {
     streaming,
     assistantDrawerOpen,
     setAssistantDrawerOpen,
+    setAssistantSection,
     composerInputRef,
     assistantDrawerReturnFocusRef,
     previousAssistantDrawerOpenRef,
@@ -6010,204 +2602,216 @@ export default function App() {
 
   return (
     <div
-      className={`page-shell mode-${uiMode} ${zenMode ? "zen-mode" : ""}`}
+      className={`page-shell ${zenMode ? "zen-mode" : ""} ${advancedPanelOpen ? "advanced-panel-open" : ""}`}
       data-writing-theme={writingTheme}
       data-typewriter-focus={typewriterDimmingEnabled ? "on" : "off"}
     >
       <TopBar
-        uiMode={uiMode}
+        advancedPanelOpen={advancedPanelOpen}
         zenMode={zenMode}
         streaming={streaming}
         settingsDialogOpen={settingsDialogOpen}
-        assistantDrawerOpen={assistantDrawerOpen}
-        onToggleUiMode={toggleUiMode}
+        theme={theme}
+        setTheme={setTheme}
+        onToggleAdvancedPanel={toggleAdvancedPanel}
         onToggleZenMode={toggleZenMode}
         onOpenSettingsDialog={openSettingsDialog}
-        onOpenAssistantDrawer={openAssistantDrawerAndFocusComposer}
         onRefreshSnapshot={handleRefresh}
         onStartNewSession={startNewSession}
       />
 
-      {uiMode === "pro" ? (
-        <Suspense
-          fallback={<LazyPanelFallback className="panel" title="工作台模式" detail="正在加载 Pro Workspace..." />}
-        >
-          <LazyProWorkspaceMode
-            statusBar={{
-              sessionId,
-              ghostAutoEnabled,
-              referenceProjectIds,
-              retrievalDegraded,
-              degradedReasons,
-              lastStreamMetrics,
-            }}
-            workbenchPanelVisibility={workbenchPanelVisibility}
-            onToggleWorkbenchPanel={(panelKey) =>
-              setWorkbenchPanelVisibility((prev) => ({
-                ...prev,
-                [panelKey]: !prev[panelKey],
-              }))
-            }
-            actionsPanelNode={
-              <AssistantActionsPanel
-                sortedActions={sortedActions}
-                pendingActionIds={pendingActionIds}
-                mutatingActionId={mutatingActionId}
-                streamLatencySamples={streamLatencySamples}
-                tokenUsageSamples={tokenUsageSamples}
-                retrievalHitSamples={retrievalHitSamples}
-                consistencyAudits={consistencyAudits}
-                consistencyAuditRunning={consistencyAuditRunning}
-                traceEvents={traceEvents}
-                graphTimeline={graphTimeline}
-                graphTimelineLoading={graphTimelineLoading}
-                graphTimelineChapterIndex={graphTimelineChapterIndex}
-                maxChapterIndex={maxChapterIndex}
-                setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
-                selectedActionId={selectedActionId}
-                actionLogs={actionLogs}
-                onLoadLogs={loadLogs}
-                onMutateAction={mutateAction}
-                onRunConsistencyAudit={runConsistencyAudit}
-              />
-            }
-            promptPanelReady={debugPromptPanelReady}
-            promptPanelProps={{
-              activePromptTemplate,
-              activePromptTemplateId,
-              templateSaving,
-              promptTemplates,
-              onHandleActiveTemplateChange: handleActiveTemplateChange,
-              onStartCreateTemplateDraft: startCreateTemplateDraft,
-              onCopyTemplateDraft: copyTemplateDraft,
-              templateName,
-              setTemplateName,
-              templateSystemPrompt,
-              setTemplateSystemPrompt,
-              templateUserPromptPrefix,
-              setTemplateUserPromptPrefix,
-              settings,
-              templateKnowledgeSettingKeys,
-              setTemplateKnowledgeSettingKeys,
-              cards,
-              templateKnowledgeCardIds,
-              setTemplateKnowledgeCardIds,
-              onSaveTemplateDraft: saveTemplateDraft,
-              templateDraftId,
-              onDeleteTemplateDraft: deleteTemplateDraft,
-              onRefreshProjectSnapshot: refreshProjectSnapshot,
-              projectId,
-              selectedKnowledgeSettings,
-              selectedKnowledgeCards,
-              estimatedPromptChars,
-              missingSettingKeys,
-              missingCardIds,
-              templateRevisions,
-              templateRevisionsLoading,
-              onRollbackTemplateToVersion: rollbackTemplateToVersion,
-            }}
-            planningPanelProps={{
-              activeChapterId,
-              volumes,
-              activeVolumeId,
-              onSelectVolume: setActiveVolumeId,
-              onCreateVolume: createVolume,
-              onBindChapterToVolume: bindActiveChapterToVolume,
-              volumeOutlineDraft,
-              setVolumeOutlineDraft,
-              onSaveVolumeOutline: saveVolumeOutline,
-              sceneBeats,
-              activeSceneBeatId,
-              onSelectSceneBeat: setActiveSceneBeatId,
-              newBeatContent,
-              setNewBeatContent,
-              onCreateSceneBeat: createBeatForActiveChapter,
-              onToggleSceneBeatStatus: toggleBeatStatus,
-              onDeleteSceneBeat: deleteBeat,
-              foreshadowCards,
-              overdueForeshadowCards,
-              foreshadowDraftTitle,
-              setForeshadowDraftTitle,
-              foreshadowDraftDescription,
-              setForeshadowDraftDescription,
-              onCreateForeshadowCard: createForeshadow,
-              onToggleForeshadowStatus: toggleForeshadowStatus,
-              onDeleteForeshadowCard: deleteForeshadow,
-              busy: planningBusy,
-            }}
-            snapshotPanelReady={proSnapshotPanelReady}
-            snapshotPanelProps={{
-              evidence,
-              settings,
-              cards,
-            }}
-          />
-        </Suspense>
-      ) : null}
+      <ErrorBoundary
+        fallbackTitle="写作区暂时不可用"
+        fallbackDescription="编辑器出现异常，已进入降级模式。请刷新页面后继续写作。"
+      >
+        <DraftWorkspacePanel
+          draftWordCount={draftWordCount}
+          draftVersion={draftVersion}
+          draftUpdatedAt={draftUpdatedAt}
+          totalChapterWords={totalChapterWords}
+          todayAddedWords={todayAddedWords}
+          onboardingChecklist={onboardingChecklist}
+          activeChapterId={activeChapterId}
+          chapters={chapters}
+          onSwitchChapter={switchChapter}
+          draftLoading={draftLoading}
+          draftSaving={draftSaving}
+          draftTitle={draftTitle}
+          setDraftTitle={setDraftTitle}
+          onCreateChapterAndSwitch={createChapterAndSwitch}
+          onMoveActiveChapter={moveActiveChapter}
+          canMoveChapterUp={canMoveChapterUp}
+          canMoveChapterDown={canMoveChapterDown}
+          onDeleteActiveChapter={deleteActiveChapter}
+          awarenessTags={awarenessTags}
+          draftFocusMode={draftFocusMode}
+          autoSaveState={autoSaveState}
+          autoSaveAt={autoSaveAt}
+          typewriterModeEnabled={typewriterModeEnabled}
+          localRecoveryNotice={localRecoveryNotice}
+          onToggleTypewriterMode={toggleTypewriterMode}
+          onToggleDraftFocusMode={toggleDraftFocusMode}
+          onToggleZenMode={toggleZenMode}
+          zenMode={zenMode}
+          canEnterZenMode={!advancedPanelOpen}
+          draftEditorRef={draftEditorRef}
+          editor={editor}
+          onSaveDraftSnapshot={saveDraftSnapshot}
+          onRefreshDraftSnapshot={refreshDraftSnapshot}
+          projectId={projectId}
+          onFillPromptFromSelection={fillPromptFromSelection}
+          onApplyAssistantToDraft={applyAssistantToDraft}
+          selectedDraftText={selectedDraftText}
+          latestAssistantReply={latestAssistantReply}
+          chapterOutlines={chapterOutlines}
+          dragChapterId={dragChapterId}
+          onOutlineDragStart={handleOutlineDragStart}
+          onOutlineDragEnd={handleOutlineDragEnd}
+          onReorderByDrag={reorderByDrag}
+          draftRevisions={draftRevisions}
+          onRollbackDraftToVersion={rollbackDraftToVersion}
+        />
+      </ErrorBoundary>
 
-      {uiMode === "writing" ? (
-        <Suspense
-          fallback={<LazyPanelFallback className="panel draft-panel" title="正文工作区" detail="正在加载写作面板..." />}
-        >
-          <LazyWritingWorkspaceMode
-            draftWordCount={draftWordCount}
-            draftVersion={draftVersion}
-            draftUpdatedAt={draftUpdatedAt}
-            totalChapterWords={totalChapterWords}
-            todayAddedWords={todayAddedWords}
-            onboardingChecklist={onboardingChecklist}
-            activeChapterId={activeChapterId}
-            chapters={chapters}
-            onSwitchChapter={switchChapter}
-            draftLoading={draftLoading}
-            draftSaving={draftSaving}
-            draftTitle={draftTitle}
-            setDraftTitle={setDraftTitle}
-            onCreateChapterAndSwitch={createChapterAndSwitch}
-            onMoveActiveChapter={moveActiveChapter}
-            canMoveChapterUp={canMoveChapterUp}
-            canMoveChapterDown={canMoveChapterDown}
-            onDeleteActiveChapter={deleteActiveChapter}
-            awarenessTags={awarenessTags}
-            draftFocusMode={draftFocusMode}
-            autoSaveState={autoSaveState}
-            autoSaveAt={autoSaveAt}
-            typewriterModeEnabled={typewriterModeEnabled}
-            localRecoveryNotice={localRecoveryNotice}
-            onToggleTypewriterMode={toggleTypewriterMode}
-            onToggleDraftFocusMode={toggleDraftFocusMode}
-            onToggleZenMode={toggleZenMode}
-            zenMode={zenMode}
-            uiMode={uiMode}
-            draftEditorRef={draftEditorRef}
-            editor={editor}
-            onSaveDraftSnapshot={saveDraftSnapshot}
-            onRefreshDraftSnapshot={refreshDraftSnapshot}
-            projectId={projectId}
-            onFillPromptFromSelection={fillPromptFromSelection}
-            onApplyAssistantToDraft={applyAssistantToDraft}
-            selectedDraftText={selectedDraftText}
-            latestAssistantReply={latestAssistantReply}
-            chapterOutlines={chapterOutlines}
-            dragChapterId={dragChapterId}
-            onOutlineDragStart={handleOutlineDragStart}
-            onOutlineDragEnd={handleOutlineDragEnd}
-            onReorderByDrag={reorderByDrag}
-            draftRevisions={draftRevisions}
-            onRollbackDraftToVersion={rollbackDraftToVersion}
-          />
-        </Suspense>
+      {advancedPanelOpen ? (
+        <section className="advanced-panel-stack" aria-label="进阶面板">
+          <section className="workspace-bar">
+            <div className="status-chip">
+              <span>当前区域</span>
+              <strong>写作优先壳层</strong>
+            </div>
+            <div className="status-chip">
+              <span>会话 ID</span>
+              <strong>{sessionId ?? "未创建"}</strong>
+            </div>
+            <div className="status-chip">
+              <span>引用项目</span>
+              <strong>{referenceProjectIds.length ? referenceProjectIds.join(", ") : "无"}</strong>
+            </div>
+            <div className={`status-chip ${retrievalDegraded ? "warn" : ""}`}>
+              <span>检索状态</span>
+              <strong>{retrievalDegraded ? "已降级（不中断写作）" : "正常"}</strong>
+              {degradedReasons.length > 0 ? <small>{degradedReasons.slice(0, 2).join(" / ")}</small> : null}
+            </div>
+            <div className="status-chip">
+              <span>Stream 指标</span>
+              {lastStreamMetrics ? (
+                <strong>
+                  {`TTFB ${Math.round(lastStreamMetrics.ttfbMs)}ms / 首 token ${
+                    lastStreamMetrics.firstTokenMs === null || lastStreamMetrics.firstTokenMs === undefined
+                      ? "--"
+                      : `${Math.round(lastStreamMetrics.firstTokenMs)}ms`
+                  }`}
+                </strong>
+              ) : (
+                <strong>未采样</strong>
+              )}
+            </div>
+          </section>
+
+          <section className="panel workbench-panel-bar">
+            <div className="panel-title sub">
+              <h3>进阶面板</h3>
+              <small>默认折叠，只在需要规划与诊断时展开</small>
+            </div>
+            <div className="workbench-panel-toggles">
+              {(Object.keys(WORKBENCH_PANEL_LABELS) as Array<keyof WorkbenchPanelVisibility>).map((panelKey) => (
+                <label key={panelKey} className="workbench-panel-toggle">
+                  <input
+                    type="checkbox"
+                    checked={workbenchPanelVisibility[panelKey]}
+                    onChange={() =>
+                      setWorkbenchPanelVisibility((prev) => ({
+                        ...prev,
+                        [panelKey]: !prev[panelKey],
+                      }))
+                    }
+                  />
+                  <span>{WORKBENCH_PANEL_LABELS[panelKey]}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+
+          {workbenchPanelVisibility.actions ? (
+            <AssistantActionsPanel
+              sortedActions={sortedActions}
+              pendingActionIds={pendingActionIds}
+              mutatingActionId={mutatingActionId}
+              streamLatencySamples={streamLatencySamples}
+              tokenUsageSamples={tokenUsageSamples}
+              retrievalHitSamples={retrievalHitSamples}
+              consistencyAudits={consistencyAudits}
+              consistencyAuditRunning={consistencyAuditRunning}
+              traceEvents={traceEvents}
+              graphTimeline={graphTimeline}
+              graphTimelineLoading={graphTimelineLoading}
+              graphTimelineChapterIndex={graphTimelineChapterIndex}
+              maxChapterIndex={maxChapterIndex}
+              setGraphTimelineChapterIndex={setGraphTimelineChapterIndex}
+              selectedActionId={selectedActionId}
+              actionLogs={actionLogs}
+              onLoadLogs={loadLogs}
+              onMutateAction={mutateAction}
+              onRunConsistencyAudit={runConsistencyAudit}
+            />
+          ) : null}
+
+          {workbenchPanelVisibility.prompt && debugPromptPanelReady ? (
+            <PromptWorkshopPanel
+              activePromptTemplate={activePromptTemplate}
+              activePromptTemplateId={activePromptTemplateId}
+              templateSaving={templateSaving}
+              promptTemplates={promptTemplates}
+              onHandleActiveTemplateChange={handleActiveTemplateChange}
+              onStartCreateTemplateDraft={startCreateTemplateDraft}
+              onCopyTemplateDraft={copyTemplateDraft}
+              templateName={templateName}
+              setTemplateName={setTemplateName}
+              templateSystemPrompt={templateSystemPrompt}
+              setTemplateSystemPrompt={setTemplateSystemPrompt}
+              templateUserPromptPrefix={templateUserPromptPrefix}
+              setTemplateUserPromptPrefix={setTemplateUserPromptPrefix}
+              settings={settings}
+              templateKnowledgeSettingKeys={templateKnowledgeSettingKeys}
+              setTemplateKnowledgeSettingKeys={setTemplateKnowledgeSettingKeys}
+              cards={cards}
+              templateKnowledgeCardIds={templateKnowledgeCardIds}
+              setTemplateKnowledgeCardIds={setTemplateKnowledgeCardIds}
+              onSaveTemplateDraft={saveTemplateDraft}
+              templateDraftId={templateDraftId}
+              onDeleteTemplateDraft={deleteTemplateDraft}
+              onRefreshProjectSnapshot={refreshProjectSnapshot}
+              projectId={projectId}
+              selectedKnowledgeSettings={selectedKnowledgeSettings}
+              selectedKnowledgeCards={selectedKnowledgeCards}
+              estimatedPromptChars={estimatedPromptChars}
+              missingSettingKeys={missingSettingKeys}
+              missingCardIds={missingCardIds}
+              templateRevisions={templateRevisions}
+              templateRevisionsLoading={templateRevisionsLoading}
+              onRollbackTemplateToVersion={rollbackTemplateToVersion}
+            />
+          ) : null}
+
+          {workbenchPanelVisibility.snapshot && proSnapshotPanelReady ? (
+            <DebugSnapshotGrid evidence={evidence} settings={settings} cards={cards} />
+          ) : null}
+        </section>
       ) : null}
 
       <ErrorBoundary
-        fallbackTitle="Pro 工作区暂时不可用"
+        fallbackTitle="写作助手暂时不可用"
         fallbackDescription="助手面板发生异常，已自动保护主编辑区。可刷新页面后继续。"
       >
         <AssistantDrawer
           projectId={projectId}
           assistantDrawerOpen={assistantDrawerOpen}
-          onOpenAssistantDrawer={openAssistantDrawerAndFocusComposer}
+          assistantSection={assistantSection}
+          onOpenAssistantDrawer={openAssistantDrawer}
           onCloseAssistantDrawer={closeAssistantDrawer}
+          onSelectAssistantSection={setAssistantSection}
+          onFocusAssistantComposer={focusAssistantComposer}
           onStartNewSession={startNewSession}
           onSwitchSession={switchSession}
           onRenameSession={renameSession}
@@ -6243,73 +2847,104 @@ export default function App() {
           onLoadLogs={loadLogs}
           onMutateAction={mutateAction}
           onRunConsistencyAudit={runConsistencyAudit}
+          planningPanelNode={
+            <StoryPlanningPanel
+              activeChapterId={activeChapterId}
+              volumes={volumes}
+              activeVolumeId={activeVolumeId}
+              onSelectVolume={setActiveVolumeId}
+              onCreateVolume={createVolume}
+              onBindChapterToVolume={bindActiveChapterToVolume}
+              volumeOutlineDraft={volumeOutlineDraft}
+              setVolumeOutlineDraft={setVolumeOutlineDraft}
+              onSaveVolumeOutline={saveVolumeOutline}
+              sceneBeats={sceneBeats}
+              activeSceneBeatId={activeSceneBeatId}
+              onSelectSceneBeat={setActiveSceneBeatId}
+              newBeatContent={newBeatContent}
+              setNewBeatContent={setNewBeatContent}
+              onCreateSceneBeat={createBeatForActiveChapter}
+              onToggleSceneBeatStatus={toggleBeatStatus}
+              onDeleteSceneBeat={deleteBeat}
+              foreshadowCards={foreshadowCards}
+              overdueForeshadowCards={overdueForeshadowCards}
+              foreshadowDraftTitle={foreshadowDraftTitle}
+              setForeshadowDraftTitle={setForeshadowDraftTitle}
+              foreshadowDraftDescription={foreshadowDraftDescription}
+              setForeshadowDraftDescription={setForeshadowDraftDescription}
+              onCreateForeshadowCard={createForeshadow}
+              onToggleForeshadowStatus={toggleForeshadowStatus}
+              onDeleteForeshadowCard={deleteForeshadow}
+              busy={planningBusy}
+            />
+          }
         />
       </ErrorBoundary>
 
-      {settingsDialogOpen ? (
-        <SettingsDialog
-          onCloseSettingsDialog={closeSettingsDialog}
-          settingsDialogRef={settingsDialogRef}
-          projectId={projectId}
-          setProjectId={setProjectId}
-          model={model}
-          setModel={setModel}
-          modelProfiles={modelProfiles}
-          ghostModelProfileId={ghostModelProfileId}
-          setGhostModelProfileId={setGhostModelProfileId}
-          selectedModelProfileId={selectedModelProfileId}
-          setSelectedModelProfileId={setSelectedModelProfileId}
-          modelProfileDraftIdInput={modelProfileDraftIdInput}
-          setModelProfileDraftIdInput={setModelProfileDraftIdInput}
-          modelProfileName={modelProfileName}
-          setModelProfileName={setModelProfileName}
-          modelProfileProvider={modelProfileProvider}
-          setModelProfileProvider={setModelProfileProvider}
-          modelProfileBaseUrl={modelProfileBaseUrl}
-          setModelProfileBaseUrl={setModelProfileBaseUrl}
-          modelProfileApiKey={modelProfileApiKey}
-          setModelProfileApiKey={setModelProfileApiKey}
-          modelProfileApiKeyMasked={modelProfileApiKeyMasked}
-          clearModelProfileApiKey={clearModelProfileApiKey}
-          setClearModelProfileApiKey={setClearModelProfileApiKey}
-          modelProfileModel={modelProfileModel}
-          setModelProfileModel={setModelProfileModel}
-          modelProfileSaving={modelProfileSaving}
-          onSaveModelProfile={saveModelProfile}
-          onDeleteModelProfile={deleteModelProfile}
-          onActivateModelProfile={activateModelProfile}
-          onResetModelProfileDraft={resetModelProfileDraft}
-          chatTemperatureProfile={chatTemperatureProfile}
-          setChatTemperatureProfile={setChatTemperatureProfile}
-          ghostTemperatureProfile={ghostTemperatureProfile}
-          setGhostTemperatureProfile={setGhostTemperatureProfile}
-          temperatureOverrideInput={temperatureOverrideInput}
-          setTemperatureOverrideInput={setTemperatureOverrideInput}
-          contextWindowProfile={contextWindowProfile}
-          setContextWindowProfile={setContextWindowProfile}
-          povMode={povMode}
-          setPovMode={setPovMode}
-          povAnchor={povAnchor}
-          setPovAnchor={setPovAnchor}
-          ragMode={ragMode}
-          setRagMode={setRagMode}
-          deterministicFirst={deterministicFirst}
-          setDeterministicFirst={setDeterministicFirst}
-          thinkingEnabled={thinkingEnabled}
-          setThinkingEnabled={setThinkingEnabled}
-          referenceProjectInput={referenceProjectInput}
-          setReferenceProjectInput={setReferenceProjectInput}
-          ghostAutoEnabled={ghostAutoEnabled}
-          setGhostAutoEnabled={setGhostAutoEnabled}
-          typewriterModeEnabled={typewriterModeEnabled}
-          setTypewriterModeEnabled={setTypewriterModeEnabled}
-          writingTheme={writingTheme}
-          setWritingTheme={setWritingTheme}
-          streaming={streaming}
-        />
-      ) : null}
+      <SettingsDialog
+        settingsDialogOpen={settingsDialogOpen}
+        onCloseSettingsDialog={closeSettingsDialog}
+        settingsDialogRef={settingsDialogRef}
+        projectId={projectId}
+        setProjectId={setProjectId}
+        model={model}
+        setModel={setModel}
+        modelProfiles={modelProfiles}
+        suggestionModelProfileId={suggestionModelProfileId}
+        setSuggestionModelProfileId={setSuggestionModelProfileId}
+        selectedModelProfileId={selectedModelProfileId}
+        setSelectedModelProfileId={setSelectedModelProfileId}
+        modelProfileDraftIdInput={modelProfileDraftIdInput}
+        setModelProfileDraftIdInput={setModelProfileDraftIdInput}
+        modelProfileName={modelProfileName}
+        setModelProfileName={setModelProfileName}
+        modelProfileProvider={modelProfileProvider}
+        setModelProfileProvider={setModelProfileProvider}
+        modelProfileBaseUrl={modelProfileBaseUrl}
+        setModelProfileBaseUrl={setModelProfileBaseUrl}
+        modelProfileApiKey={modelProfileApiKey}
+        setModelProfileApiKey={setModelProfileApiKey}
+        modelProfileApiKeyMasked={modelProfileApiKeyMasked}
+        clearModelProfileApiKey={clearModelProfileApiKey}
+        setClearModelProfileApiKey={setClearModelProfileApiKey}
+        modelProfileModel={modelProfileModel}
+        setModelProfileModel={setModelProfileModel}
+        modelProfileSaving={modelProfileSaving}
+        onSaveModelProfile={saveModelProfile}
+        onDeleteModelProfile={deleteModelProfile}
+        onActivateModelProfile={activateModelProfile}
+        onResetModelProfileDraft={resetModelProfileDraft}
+        chatTemperatureProfile={chatTemperatureProfile}
+        setChatTemperatureProfile={setChatTemperatureProfile}
+        suggestionTemperatureProfile={suggestionTemperatureProfile}
+        setSuggestionTemperatureProfile={setSuggestionTemperatureProfile}
+        temperatureOverrideInput={temperatureOverrideInput}
+        setTemperatureOverrideInput={setTemperatureOverrideInput}
+        contextWindowProfile={contextWindowProfile}
+        setContextWindowProfile={setContextWindowProfile}
+        povMode={povMode}
+        setPovMode={setPovMode}
+        povAnchor={povAnchor}
+        setPovAnchor={setPovAnchor}
+        ragMode={ragMode}
+        setRagMode={setRagMode}
+        deterministicFirst={deterministicFirst}
+        setDeterministicFirst={setDeterministicFirst}
+        thinkingEnabled={thinkingEnabled}
+        setThinkingEnabled={setThinkingEnabled}
+        referenceProjectInput={referenceProjectInput}
+        setReferenceProjectInput={setReferenceProjectInput}
+        typewriterModeEnabled={typewriterModeEnabled}
+        setTypewriterModeEnabled={setTypewriterModeEnabled}
+        writingTheme={writingTheme}
+        setWritingTheme={setWritingTheme}
+        streaming={streaming}
+      />
 
       {error ? <div className="error-banner">错误：{error}</div> : null}
     </div>
   );
 }
+
+
+

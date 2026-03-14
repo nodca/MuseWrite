@@ -9,7 +9,9 @@ import type {
 } from "../types";
 
 interface ChatStoreState {
-  uiMode: "writing" | "pro";
+  assistantDrawerOpen: boolean;
+  advancedPanelOpen: boolean;
+  assistantSection: "planning" | "chat";
   projectId: number;
   model: string;
   povMode: "global" | "character";
@@ -31,7 +33,9 @@ interface ChatStoreState {
   actionLogs: ActionAuditLog[];
   evidence: EvidencePayload | null;
 
-  setUiMode: (uiMode: "writing" | "pro") => void;
+  setAssistantDrawerOpen: (open: boolean) => void;
+  setAdvancedPanelOpen: (open: boolean) => void;
+  setAssistantSection: (section: "planning" | "chat") => void;
   setProjectId: (projectId: number) => void;
   setModel: (model: string) => void;
   setPovMode: (povMode: "global" | "character") => void;
@@ -60,7 +64,9 @@ interface ChatStoreState {
 }
 
 export const useChatStore = create<ChatStoreState>((set) => ({
-  uiMode: "writing",
+  assistantDrawerOpen: false,
+  advancedPanelOpen: false,
+  assistantSection: "planning",
   projectId: 1,
   model: "",
   povMode: "global",
@@ -81,7 +87,12 @@ export const useChatStore = create<ChatStoreState>((set) => ({
   actionLogs: [],
   evidence: null,
 
-  setUiMode: (uiMode) => set((state) => (state.uiMode === uiMode ? state : { uiMode })),
+  setAssistantDrawerOpen: (assistantDrawerOpen) =>
+    set((state) => (state.assistantDrawerOpen === assistantDrawerOpen ? state : { assistantDrawerOpen })),
+  setAdvancedPanelOpen: (advancedPanelOpen) =>
+    set((state) => (state.advancedPanelOpen === advancedPanelOpen ? state : { advancedPanelOpen })),
+  setAssistantSection: (assistantSection) =>
+    set((state) => (state.assistantSection === assistantSection ? state : { assistantSection })),
   setProjectId: (projectId) => set((state) => (state.projectId === projectId ? state : { projectId })),
   setModel: (model) => set((state) => (state.model === model ? state : { model })),
   setPovMode: (povMode) => set((state) => (state.povMode === povMode ? state : { povMode })),

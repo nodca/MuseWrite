@@ -1,15 +1,28 @@
 {
   "dataset_name": "novel_rag_eval",
-  "dataset_version": "v1.1-frozen",
-  "frozen_at": "2026-02-27",
+  "dataset_version": "v2.0-frozen",
+  "frozen_at": "2026-03-12",
   "owner": "novel-platform",
   "project_id": 1,
   "question_set": "apps/api/evals/data/novel_rag_eval.jsonl",
   "fixture_docs_set": "apps/api/evals/data/novel_rag_docs.jsonl",
   "default_threshold": 0.55,
+  "stats": {
+    "question_count": 50,
+    "doc_count": 100,
+    "question_subsets": {"global": 32, "character": 18},
+    "doc_noise_count": 28
+  },
   "notes": [
-    "This manifest defines the frozen baseline for retrieval strategy regression.",
-    "Question set now includes explicit subset tags (global/character) for POV split scoring.",
+    "v2.0: expanded from 12 questions + 8 docs to 50 questions + 100 docs.",
+    "Question set includes explicit subset tags (global/character) for POV split scoring.",
+    "Doc set includes ~28 noise documents to test retrieval precision under distraction.",
+    "Sufficient scale to measure heuristic router vs LLM router quality delta.",
+    "Sufficient scale to measure LightRAG-enabled vs disabled retrieval gain.",
     "If question set or fixture docs changes, bump dataset_version and record changelog."
+  ],
+  "changelog": [
+    {"version": "v1.1-frozen", "date": "2026-02-27", "changes": "Initial 12 questions + 8 docs with subset tags."},
+    {"version": "v2.0-frozen", "date": "2026-03-12", "changes": "Expanded to 50 questions + 100 docs. Added noise docs. LightRAG set as required dependency."}
   ]
 }

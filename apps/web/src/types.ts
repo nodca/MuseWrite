@@ -24,13 +24,13 @@ export interface ChatStreamRequest {
   deterministic_first?: boolean;
   thinking_enabled?: boolean;
   reference_project_ids?: number[];
-  temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;
+  temperature_profile?: "action" | "chat" | "suggestion" | "brainstorm" | null;
   temperature_override?: number | null;
   context_window_profile?: "balanced" | "chapter_focus" | "world_focus" | "minimal" | null;
   model_profile_id?: string | null;
 }
 
-export interface GhostTextRewriteRequest {
+export interface SelectionRewriteRequest {
   project_id: number;
   chapter_id?: number | null;
   scene_beat_id?: number | null;
@@ -40,37 +40,14 @@ export interface GhostTextRewriteRequest {
   active_roles?: string[] | null;
   model: string | null;
   style_guard?: boolean;
-  temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;
+  temperature_profile?: "action" | "chat" | "suggestion" | "brainstorm" | null;
   temperature_override?: number | null;
   model_profile_id?: string | null;
 }
 
-export interface GhostTextResponse {
+export interface SelectionRewriteResponse {
   suggestion: string;
   usage: Record<string, unknown>;
-}
-
-export interface GhostTextStreamRequest {
-  project_id: number;
-  chapter_id?: number | null;
-  scene_beat_id?: number | null;
-  prompt_template_id?: number | null;
-  prefix: string;
-  suffix: string;
-  chapter_goal?: string | null;
-  active_roles?: string[] | null;
-  model: string | null;
-  style_guard?: boolean;
-  temperature_profile?: "action" | "chat" | "ghost" | "brainstorm" | null;
-  temperature_override?: number | null;
-  model_profile_id?: string | null;
-}
-
-export interface GhostTextStreamEvent {
-  type: "start" | "delta" | "done" | "error";
-  text: string;
-  usage?: Record<string, unknown>;
-  message?: string | null;
 }
 
 export interface ChatStreamMetaEvent {
@@ -180,6 +157,19 @@ export interface EvidencePayload {
     dsl: EvidenceItem[];
     graph: EvidenceItem[];
     rag: EvidenceItem[];
+  };
+  book_memory?: {
+    enabled: boolean;
+    layers: Array<{
+      layer: string;
+      label: string;
+      items: number;
+    }>;
+    l5_triggered: boolean;
+    sections: Array<{
+      label: string;
+      chars: number;
+    }>;
   };
 }
 
@@ -563,3 +553,4 @@ export interface GraphCandidateBatchReviewResponse {
   reviewed_count: number;
   fact_keys: string[];
 }
+

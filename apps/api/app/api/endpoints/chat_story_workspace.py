@@ -55,6 +55,7 @@ from app.services.chat_service import (
     update_scene_beat,
 )
 from .chat_helpers import ensure_project_scope_access as _ensure_project_access
+from app.services.lightrag_ingestion import enqueue_chapter_ingestion
 
 router = APIRouter()
 
@@ -221,7 +222,7 @@ def save_chapter(
 ):
     _ensure_project_access(project_id, principal)
     try:
-        return save_project_chapter(
+        chapter = save_project_chapter(
             db,
             project_id=project_id,
             chapter_id=chapter_id,
@@ -235,6 +236,13 @@ def save_chapter(
         raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    enqueue_chapter_ingestion(
+        project_id=project_id,
+        chapter_id=chapter_id,
+        title=payload.title or "",
+        content=payload.content or "",
+    )
+    return chapter
 
 
 @router.post("/projects/{project_id}/chapters/{chapter_id}/move", response_model=ProjectChapterRead)
@@ -355,6 +363,7 @@ def create_chapter_scene_beat(
             chapter_id=chapter_id,
             content=payload.content,
             status=payload.status,
+            operator_id=principal.user_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -378,6 +387,7 @@ def save_chapter_scene_beat(
             beat_id=beat_id,
             content=payload.content,
             status=payload.status,
+            operator_id=principal.user_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

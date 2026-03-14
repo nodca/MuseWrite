@@ -93,7 +93,6 @@ type UseDraftWorkspaceFlowArgs = {
   setDraftSaving: (saving: boolean) => void;
   setActiveChapterId: (chapterId: number | null) => void;
   setError: (error: string | null) => void;
-  setGhostError: (error: string | null) => void;
   setDraftTitle: (title: string) => void;
   setDraftVersion: (version: number) => void;
   setDraftUpdatedAt: (updatedAt: string | null) => void;
@@ -121,7 +120,6 @@ export function useDraftWorkspaceFlow({
   setDraftSaving,
   setActiveChapterId,
   setError,
-  setGhostError,
   setDraftTitle,
   setDraftVersion,
   setDraftUpdatedAt,
@@ -161,7 +159,6 @@ export function useDraftWorkspaceFlow({
       }
       if (options?.auto) {
         setAutoSaveState("saving");
-        setGhostError(null);
       }
       try {
         const normalizedTitle = String(draftTitle ?? "").trim() || "未命名章节";
@@ -230,7 +227,6 @@ export function useDraftWorkspaceFlow({
       setDraftUpdatedAt,
       setDraftVersion,
       setError,
-      setGhostError,
       setLocalRecoveryNotice,
       lastSavedDraftRef,
     ]

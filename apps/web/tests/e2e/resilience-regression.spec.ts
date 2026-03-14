@@ -135,25 +135,6 @@ async function installMockChatApi(page: Page, options: MockChatApiOptions = {}):
       return;
     }
 
-    if (
-      (path === "/api/chat/ghost-text/polish" || path === "/api/chat/ghost-text/expand") &&
-      method === "POST"
-    ) {
-      const rawBody = request.postData() ?? "{}";
-      const parsedBody = JSON.parse(rawBody) as {
-        text?: string;
-      };
-      const mode = path.endsWith("/expand") ? "expand" : "polish";
-      const base = String(parsedBody.text ?? "").slice(0, 20) || "片段";
-      await fulfillJson(route, {
-        suggestion:
-          mode === "expand"
-            ? `${base}，扩写补充了一层细节与动作。`
-            : `${base}，语句更凝练，情绪更清晰。`,
-        usage: { provider: "mock", ghost_mode: mode },
-      });
-      return;
-    }
     if (path === `/api/chat/projects/${projectId}/sessions` && method === "GET") {
       await fulfillJson(route, summarizeSessions());
       return;
@@ -265,13 +246,14 @@ async function installMockChatApi(page: Page, options: MockChatApiOptions = {}):
 
 async function openAssistantDrawer(page: Page): Promise<Locator> {
   await page.goto("/");
-  await page.getByRole("button", { name: "助手抽屉" }).click();
+  await page.getByRole("button", { name: "写作助手" }).click();
   const drawer = page.locator("#assistant-drawer");
-  await expect(drawer).toHaveAttribute("aria-hidden", "false");
+  await expect(drawer).toBeVisible();
   return drawer;
 }
 
 async function sendPrompt(drawer: Locator, prompt: string): Promise<void> {
+  await drawer.getByRole("tab", { name: "对话" }).click();
   const composer = drawer.locator(".composer textarea");
   const sendButton = drawer.locator(".composer button");
   await composer.fill(prompt);
@@ -348,34 +330,5 @@ test.describe("resilience regression", () => {
     await expect
       .poll(async () => ((await assistantRows.last().textContent()) ?? "").trim().length, { timeout: 45_000 })
       .toBeGreaterThan(0);
-  });
-
-  test.fixme("selection context menu triggers polish and expand ghost actions", async ({ page }) => {
-    await installMockChatApi(page);
-    await page.goto("/");
-    await page.getByRole("button", { name: "刷新快照" }).click();
-
-    const createChapterButton = page.getByRole("button", { name: "点击新建章节开始写作" });
-    if ((await createChapterButton.isVisible()) && (await createChapterButton.isEnabled())) {
-      await createChapterButton.click();
-    }
-
-    const editorSurface = page.locator(".draft-editor .ProseMirror");
-    await expect(editorSurface).toBeVisible();
-    await editorSurface.click();
-    await page.keyboard.press("Control+a");
-
-    await editorSurface.click({ button: "right" });
-    const menu = page.locator(".selection-context-menu");
-    await expect(menu).toBeVisible();
-    await menu.getByRole("button", { name: /润色选中/ }).click();
-
-    const preview = page.locator(".ghost-preview");
-    await expect(preview).toContainText("语句更凝练", { timeout: 15_000 });
-
-    await editorSurface.click({ button: "right" });
-    await expect(menu).toBeVisible();
-    await menu.getByRole("button", { name: /扩写选中/ }).click();
-    await expect(preview).toContainText("扩写补充", { timeout: 15_000 });
   });
 });

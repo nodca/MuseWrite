@@ -5,8 +5,10 @@ from sqlmodel import Session
 from app.core.config import settings
 from app.services.base_queue import BaseQueue
 
+_QUEUE = "graph_sync_jobs"
+
 def _queue_name() -> str:
-    return settings.graph_sync_queue_name.strip()
+    return _QUEUE
 
 
 _GRAPH_QUEUE = BaseQueue(

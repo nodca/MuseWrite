@@ -28,6 +28,17 @@ __pycache__/
 .tmp/
 apps/api/models/
 
+# Python virtual environments
+.venv/
+venv/
+
+# Reference repos (cloned for study, not part of project)
+references/
+
+# Eval output
+apps/api/evals/out/
+
 # Claude local workspace artifacts
 .claude/worktrees/
 .worktrees/
+.tmp-trace*
